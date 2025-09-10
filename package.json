@@ -8,7 +8,7 @@
   },
 "scripts": {
   "dev": "tsx src/server.ts",
-  "build": "npx tsup src/server.ts --format esm --clean",
+  "build": "npx tsup src/server.ts --format esm --clean --out-dir dist",
   "start": "node dist/server.js"
 },
   "keywords": [],
