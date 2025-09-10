@@ -13,7 +13,7 @@ const app = fastify();
 // ===================================================================
 
 const allowedOrigins: string[] = [
-  "http://localhost:3000" // Sua URL de desenvolvimento local
+  "https://lock-frontend.onrender.com" // Sua URL de desenvolvimento local
 ];
 
 // Adiciona a URL do frontend do Render à lista apenas se ela existir
