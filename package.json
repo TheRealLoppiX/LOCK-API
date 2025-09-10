@@ -6,11 +6,11 @@
   "engine": {
     "node": "22.18.0"
   },
-  "scripts": {
-    "dev": "tsx src/server.ts",
-    "start": "node dist/server.ts",
-    "build": "tsup src"
-  },
+"scripts": {
+  "dev": "tsx src/server.ts",
+  "build": "npx tsup src/server.ts --format esm --clean",
+  "start": "node dist/server.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
