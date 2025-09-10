@@ -7,9 +7,9 @@
     "node": "22.18.0"
   },
   "scripts": {
-    "dev": "tsx src/server.ts",
-    "start": "tsup src/server.ts --format esm --clean",
-    "build": "node dist/server.js"
+  "dev": "tsx src/server.ts",
+  "build": "tsup src/server.ts --format esm --clean",
+  "start": "node dist/server.js"
   },
   "keywords": [],
   "author": "",
