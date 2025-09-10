@@ -13,16 +13,16 @@ const app = fastify();
 // ===================================================================
 
 const allowedOrigins: string[] = [
-  "https://lock-frontend.onrender.com" // Sua URL de desenvolvimento local
+  "http://localhost:3000" // 1. Para seu desenvolvimento local
 ];
 
-// Adiciona a URL do frontend do Render à lista apenas se ela existir
+// 2. Adiciona a URL do seu site no ar (se estiver configurada)
 if (process.env.FRONTEND_URL) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
 app.register(cors, {
-    origin: "https://lock-frontend.onrender.com",
+    origin: allowedOrigins, // 3. Usa a lista completa de origens permitidas
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
 
