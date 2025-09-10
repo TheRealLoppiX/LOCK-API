@@ -8,8 +8,8 @@
   },
 "scripts": {
   "dev": "tsx src/server.ts",
-  "build": "npx tsup src/server.ts --format esm --clean --out-dir dist",
-  "start": "node dist/server.js"
+  "build": "npx tsup src/server.ts --format esm --clean",
+  "start": "node dist/server.mjs"
 },
   "keywords": [],
   "author": "",
