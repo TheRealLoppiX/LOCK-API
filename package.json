@@ -8,7 +8,7 @@
   },
   "scripts": {
   "dev": "tsx src/server.ts",
-  "build": "tsup src/server.ts --format esm --clean",
+  "build": "tsup src",
   "start": "node dist/server.js"
   },
   "keywords": [],
