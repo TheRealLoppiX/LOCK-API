@@ -22,7 +22,7 @@ if (process.env.FRONTEND_URL) {
 }
 
 app.register(cors, {
-    origin: allowedOrigins,
+    origin: "https://lock-frontend.onrender.com",
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
 
