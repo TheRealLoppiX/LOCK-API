@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "start": "node dist/server.ts",
-    "build": "tsup src"
+    "build": "npx tsup src/server.ts --format esm --clean"
   },
   "keywords": [],
   "author": "",
