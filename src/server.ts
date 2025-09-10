@@ -12,8 +12,17 @@ const app = fastify();
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 
+const allowedOrigins: string[] = [
+  "http://localhost:3000" // Sua URL de desenvolvimento local
+];
+
+// Adiciona a URL do frontend do Render à lista apenas se ela existir
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
 app.register(cors, {
-    origin: "http://localhost:3000",
+    origin: allowedOrigins,
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
 
