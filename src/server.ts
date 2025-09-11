@@ -4,7 +4,9 @@ import cors from '@fastify/cors';
 import { supabase } from "./supabaseConnection.js";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { Resend } from 'resend'; // NOVO: Importe a biblioteca Resend
+import { Resend } from 'resend';
+import jwt from '@fastify/jwt';
+import { z } from 'zod';
 
 const app = fastify();
 
@@ -201,6 +203,54 @@ app.post("/reset-password", async (request, reply) => {
     }
 });
 
+// ROTA PARA ATUALIZAR O PERFIL DO USUÁRIO
+app.put('/profile/update', async (request, reply) => {
+  try {
+    // 1. Validar o token JWT para pegar o ID do usuário
+    await request.jwtVerify();
+    const userId = request.user.sub; // 'sub' contém o ID do usuário
+
+    // 2. Definir o esquema de validação para os dados recebidos
+    const updateProfileSchema = z.object({
+      name: z.string().min(3).optional(),
+      avatar_url: z.string().url().optional(),
+    });
+
+    const body = updateProfileSchema.parse(request.body);
+
+    // 3. Montar o objeto de atualização
+    const updateData: { name?: string; avatar_url?: string } = {};
+    if (body.name) updateData.name = body.name;
+    if (body.avatar_url) updateData.avatar_url = body.avatar_url;
+
+    // Se não há nada para atualizar, retorna erro
+    if (Object.keys(updateData).length === 0) {
+      return reply.status(400).send({ message: 'Nenhum dado fornecido para atualização.' });
+    }
+
+    // 4. Atualizar os dados no Supabase
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(updateData)
+      .eq('id', userId)
+      .select()
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    // 5. Retornar o perfil atualizado
+    return reply.status(200).send({ user: data });
+
+  } catch (error) {
+    console.error('Erro ao atualizar perfil:', error);
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    return reply.status(500).send({ message: 'Erro interno ao atualizar perfil.' });
+  }
+});
 
 // ... suas outras rotas e a inicialização do servidor ...
 app.listen({
