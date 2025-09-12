@@ -134,16 +134,61 @@ app.put('/profile/update', async (request, reply) => {
     }
 });
 
-// --- ROTA DE ESQUECI A PALAVRA-PASSE ---
 app.post("/forgot-password", async (request, reply) => {
-    // ... seu código de forgot-password (nenhuma alteração necessária) ...
+    try {
+        const { email } = request.body as { email: string };
+        const { data: user } = await supabase.from("users").select("id").eq("email", email).single();
+        if (!user) {
+            return { message: "Se um utilizador com este e-mail existir, um link de redefinição será enviado." };
+        }
+        
+        const resetToken = crypto.randomBytes(32).toString("hex");
+        const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+        
+        const expires = new Date();
+        expires.setHours(expires.getHours() + 1);
+
+        await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
+        
+        const resetUrl = `https://lock-front.onrender.com/reset-password/${resetToken}`;
+        const resend = new Resend(process.env.RESEND_API_KEY);
+        
+        await resend.emails.send({
+            from: 'LOCK Platform <onboarding@resend.dev>',
+            to: email,
+            subject: 'O seu Link de Redefinição de Palavra-passe',
+            html: `<p>Clique aqui para redefinir a sua palavra-passe: <a href="${resetUrl}">Redefinir Palavra-passe</a>. Este link expira em 1 hora.</p>`,
+        });
+
+        return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
+    } catch (error) {
+        console.error("Erro em forgot-password:", error);
+        return reply.status(500).send({ error: "Erro interno no servidor." });
+    }
 });
 
-// --- ROTA PARA REDEFINIR A PALAVRA-PASSE ---
+// --- ROTA PARA REDEFINIR A SENHA COM O TOKEN ---
 app.post("/reset-password", async (request, reply) => {
-    // ... seu código de reset-password (nenhuma alteração necessária) ...
-});
+    try {
+        const { token, password } = request.body as { token: string; password: string };
+        const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+        
+        const { data: user, error } = await supabase.from("users").select("*").eq("reset_token", hashedToken).single();
+        
+        if (error || !user || new Date(user.reset_token_expires) < new Date()) {
+            return reply.status(400).send({ error: "Token inválido ou expirado." });
+        }
 
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
+        
+        return { message: "Palavra-passe redefinida com sucesso!" };
+    } catch (error) {
+        console.error("Erro em reset-password:", error);
+        return reply.status(500).send({ error: "Erro interno no servidor." });
+    }
+});
 
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
