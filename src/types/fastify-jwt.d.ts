@@ -1,18 +1,18 @@
-// Conteúdo do arquivo: src/types/fastify-jwt.d.ts
-
 import '@fastify/jwt';
 
 declare module '@fastify/jwt' {
+  // Este interface define o que está DENTRO do nosso token
   interface FastifyJWT {
-    // A payload é o conteúdo "dentro" do seu token
     payload: {
-      sub: string; // 'sub' é o ID do usuário, padrão do JWT
-      // adicione aqui outras propriedades que seu token possa ter
+      sub: string; // O ID do utilizador
+      name: string;
+      avatar_url?: string;
     };
-    // O user é um atalho para a payload decodificada
+    // O `request.user` será um atalho para a payload
     user: {
       sub: string;
-      // espelhe as mesmas propriedades da payload
+      name: string;
+      avatar_url?: string;
     };
   }
 }
