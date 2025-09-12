@@ -14,17 +14,12 @@ const app = fastify();
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 
-// Regista o plugin do JWT com a chave secreta do Supabase
 app.register(jwt, {
     secret: process.env.SUPABASE_JWT_SECRET!,
 });
 
-// Regista o plugin do CORS
 app.register(cors, {
-    origin: [
-        "http://localhost:3000",
-        "https://lock-front.onrender.com"
-    ], 
+    origin: ["http://localhost:3000", "https://lock-front.onrender.com"], 
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
 
@@ -62,20 +57,30 @@ app.post("/login", async (request, reply) => {
     try {
         const { identifier, password } = request.body as { identifier: string; password: string };
         const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
+
         if (error || !user) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
+        
         const passwordMatch = await bcrypt.compare(password, user.password);
+
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
         
-        // CORRIGIDO: Gera o token JWT após o login
-        const token = app.jwt.sign({ name: user.name, avatar_url: user.avatar_url }, { sub: user.id, expiresIn: '7 days' });
+        const token = app.jwt.sign(
+            { 
+                sub: user.id.toString(), // CORRIGIDO: Converte o ID (número) para string
+                name: user.name,
+                avatar_url: user.avatar_url,
+            }, 
+            {
+                expiresIn: '7 days',
+            }
+        );
 
         delete user.password;
         
-        // Retorna o utilizador E o token
         return { user, token };
     } catch (error) {
         console.error("Erro no login:", error);
