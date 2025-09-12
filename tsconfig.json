@@ -1,44 +1,32 @@
 {
-  // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
-    // File Layout
-    // "rootDir": "./src",
-    // "outDir": "./dist",
-
-    // Environment Settings
-    // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
-    "target": "esnext",
-    "types": [],
-    // For nodejs:
-    // "lib": ["esnext"],
-    // "types": ["node"],
-    // and npm install -D @types/node
-
-    // Other Outputs
-    "sourceMap": true,
-    "declaration": true,
-    "declarationMap": true,
-
-    // Stricter Typechecking Options
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-
-    // Style Options
-    // "noImplicitReturns": true,
-    // "noImplicitOverride": true,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noPropertyAccessFromIndexSignature": true,
-
-    // Recommended Options
-    "strict": true,
-    "jsx": "react-jsx",
-    "verbatimModuleSyntax": true,
+    // Configurações Base do Projeto
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
+
+    // Regras de Qualidade e Segurança de Código
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+
+    // A CORREÇÃO PRINCIPAL: Ensina o TypeScript a encontrar os nossos tipos personalizados
+    "typeRoots": [
+      "./node_modules/@types", 
+      "./src/types"
+    ],
+    
+    // Diz ao TypeScript para não gerar ficheiros .js, pois o 'tsup' faz isso
+    "noEmit": true
+  },
+  // Diz ao TypeScript para incluir todos os ficheiros dentro da pasta 'src'
+  "include": ["src"],
+
+  // Configuração para a ferramenta 'tsx' que você usa em desenvolvimento
+  "ts-node": {
+    "esm": true
   }
 }
