@@ -14,19 +14,15 @@ const app = fastify();
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 
-const allowedOrigins: string[] = [
-  "http://localhost:3000" // 1. Para seu desenvolvimento local
-];
-
-// 2. Adiciona a URL do seu site no ar (se estiver configurada)
-if (process.env.FRONTEND_URL) {
-  allowedOrigins.push(process.env.FRONTEND_URL);
-}
-
 app.register(cors, {
-    origin: allowedOrigins, // 3. Usa a lista completa de origens permitidas
+    // Colocamos as URLs permitidas diretamente aqui
+    origin: [
+        "http://localhost:3000",             // Para o seu desenvolvimento local
+        "https://lock-front.onrender.com"      // A URL exata do seu site no ar
+    ], 
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
+
 
 // ===================================================================
 // DEFINIÇÃO DE TIPOS E ROTAS
