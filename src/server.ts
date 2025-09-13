@@ -31,7 +31,7 @@ app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onren
 
 /**
  * @route POST /register
- * @description Regista um novo utilizador.
+ * @description Registra um novo usuário.
  */
 app.post("/register", async (request, reply) => {
     try {
@@ -52,7 +52,7 @@ app.post("/register", async (request, reply) => {
 
 /**
  * @route POST /login
- * @description Autentica um utilizador e retorna um token JWT.
+ * @description Autentica um usuário e retorna um token JWT.
  */
 app.post("/login", async (request, reply) => {
     try {
@@ -65,14 +65,19 @@ app.post("/login", async (request, reply) => {
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
+        
         const token = app.jwt.sign(
             { 
-                sub: user.id.toString(), // <-- A CORREÇÃO ESTÁ AQUI
+                // =======================================================
+                // A CORREÇÃO DEFINITIVA ESTÁ NESSA LINHA AQUI ABAIXO
+                // =======================================================
+                sub: user.id.toString(),
                 name: user.name,
                 avatar_url: user.avatar_url 
             }, 
             { expiresIn: '7 days' }
         );
+
         delete user.password;
         return { user, token };
     } catch (error) {
@@ -84,7 +89,7 @@ app.post("/login", async (request, reply) => {
 
 /**
  * @route PUT /profile/update
- * @description Atualiza o perfil de um utilizador autenticado.
+ * @description Atualiza o perfil de um usuário autenticado.
  */
 app.put('/profile/update', async (request, reply) => {
     try {
@@ -107,7 +112,7 @@ app.put('/profile/update', async (request, reply) => {
 
 /**
  * @route POST /forgot-password
- * @description Inicia o fluxo de redefinição de palavra-passe.
+ * @description Inicia o fluxo de redefinição de senha.
  */
 app.post("/forgot-password", async (request, reply) => {
     try {
@@ -123,11 +128,11 @@ app.post("/forgot-password", async (request, reply) => {
             await resend.emails.send({
                 from: 'LOCK Platform <onboarding@resend.dev>',
                 to: email,
-                subject: 'O seu Link de Redefinição de Palavra-passe',
-                html: `<p>Clique aqui para redefinir: <a href="${resetUrl}">Redefinir Palavra-passe</a>.</p>`,
+                subject: 'Seu Link de Redefinição de Senha',
+                html: `<p>Clique aqui para redefinir: <a href="${resetUrl}">Redefinir Senha</a>.</p>`,
             });
         }
-        return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
+        return { message: "Se um usuário com este e-mail existir, um link de redefinição foi enviado." };
     } catch (error) {
         if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro em forgot-password:", error);
@@ -137,7 +142,7 @@ app.post("/forgot-password", async (request, reply) => {
 
 /**
  * @route POST /reset-password
- * @description Conclui a redefinição de palavra-passe.
+ * @description Conclui a redefinição de senha.
  */
 app.post("/reset-password", async (request, reply) => {
     try {
@@ -149,7 +154,7 @@ app.post("/reset-password", async (request, reply) => {
         }
         const hashedPassword = await bcrypt.hash(password, 10);
         await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
-        return { message: "Palavra-passe redefinida com sucesso!" };
+        return { message: "Senha redefinida com sucesso!" };
     } catch (error) {
         if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro em reset-password:", error);
@@ -159,7 +164,7 @@ app.post("/reset-password", async (request, reply) => {
 
 /**
  * @route GET /labs/completions
- * @description Obtém os laboratórios concluídos pelo utilizador.
+ * @description Obtém os laboratórios concluídos pelo usuário.
  */
 app.get('/labs/completions', async (request, reply) => {
     try {
@@ -184,17 +189,24 @@ app.post('/labs/complete', async (request, reply) => {
         await request.jwtVerify();
         const userId = request.user.sub;
         const { labId } = z.object({ labId: z.string() }).parse(request.body);
-        const { data: existing } = await supabase.from('lab_completions').select('id').eq('user_id', userId).eq('lab_id', labId).single();
+        
+        // CORRIGIDO: Usa .maybeSingle() para não dar erro se não encontrar nada.
+        const { data: existing, error: selectError } = await supabase.from('lab_completions').select('id').eq('user_id', userId).eq('lab_id', labId).maybeSingle();
+        if (selectError) throw selectError;
+
         if (existing) {
             return { message: 'Laboratório já concluído.' };
         }
-        await supabase.from('lab_completions').insert({ user_id: userId, lab_id: labId });
+        const { error: insertError } = await supabase.from('lab_completions').insert({ user_id: userId, lab_id: labId });
+        if (insertError) throw insertError;
+
         return reply.status(201).send({ message: 'Progresso guardado com sucesso!' });
     } catch (error) {
         console.error('Erro ao marcar laboratório como concluído:', error);
         return reply.status(500).send({ message: 'Erro ao guardar progresso.' });
     }
 });
+
 
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
@@ -203,5 +215,5 @@ app.listen({
     host: "0.0.0.0",
     port: process.env.PORT ? Number(process.env.PORT) : 3333,
 }).then(() => {
-    console.log("🚀 Servidor a rodar com CORS ativado em http://localhost:3333");
+    console.log("🚀 Servidor rodando com CORS ativado em http://localhost:3333");
 });
