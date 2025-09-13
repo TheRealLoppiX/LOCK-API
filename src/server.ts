@@ -11,6 +11,37 @@ import { z } from 'zod';
 const app = fastify();
 
 // ===================================================================
+// ESQUEMAS DE VALIDAÇÃO (ZOD)
+// ===================================================================
+// Centralizamos as "regras" para os dados que a API aceita.
+
+const registerUserSchema = z.object({
+    name: z.string().min(3),
+    email: z.string().email(),
+    password: z.string().min(6),
+});
+
+const loginSchema = z.object({
+    identifier: z.string().min(3),
+    password: z.string().min(6),
+});
+
+const forgotPasswordSchema = z.object({
+    email: z.string().email(),
+});
+
+const resetPasswordSchema = z.object({
+    token: z.string().min(1),
+    password: z.string().min(6),
+});
+
+const updateProfileSchema = z.object({
+    name: z.string().min(3).optional(),
+    avatar_url: z.string().url().optional(),
+});
+
+
+// ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 
@@ -23,108 +54,90 @@ app.register(cors, {
     methods: ["GET", "POST", "PUT", "DELETE"],
 });
 
+
 // ===================================================================
-// ROTAS
+// ROTAS DE AUTENTICAÇÃO E PERFIL
 // ===================================================================
 
-type Users = {
-    name: string;
-    email: string;
-    password: string;
-};
-
-// --- ROTA DE CADASTRO (REGISTER) ---
+/**
+ * @route POST /register
+ * @description Regista um novo utilizador na base de dados.
+ */
 app.post("/register", async (request, reply) => {
     try {
-        const { name, email, password } = request.body as Users;
+        const { name, email, password } = registerUserSchema.parse(request.body);
+        
         const { data: exists } = await supabase.from("users").select("email").eq("email", email).single();
         if (exists) {
-            return reply.status(400).send({ error: "Email já cadastrado" });
+            return reply.status(409).send({ error: "Email já cadastrado" });
         }
+
         const hashedPassword = await bcrypt.hash(password, 10);
         const { data, error } = await supabase.from("users").insert([{ name, email, password: hashedPassword }]).select().single();
+
         if (error) throw error;
         if (data) delete data.password;
-        return { user: data };
+
+        return reply.status(201).send({ user: data });
     } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        }
         console.error("Erro no registro:", error);
         return reply.status(500).send({ error: "Erro ao registrar usuário" });
     }
 });
 
-// --- ROTA DE LOGIN (COM GERAÇÃO DE TOKEN) ---
+/**
+ * @route POST /login
+ * @description Autentica um utilizador e retorna um token JWT.
+ */
 app.post("/login", async (request, reply) => {
     try {
-        const { identifier, password } = request.body as { identifier: string; password: string };
-        const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
+        const { identifier, password } = loginSchema.parse(request.body);
 
+        const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
         if (error || !user) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
         
         const passwordMatch = await bcrypt.compare(password, user.password);
-
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
         
-        const token = app.jwt.sign(
-            { 
-                sub: user.id.toString(), // CORRIGIDO: Converte o ID (número) para string
-                name: user.name,
-                avatar_url: user.avatar_url,
-            }, 
-            {
-                expiresIn: '7 days',
-            }
-        );
-
+        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
         delete user.password;
-        
+
         return { user, token };
     } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        }
         console.error("Erro no login:", error);
         return reply.status(500).send({ error: "Erro no login" });
     }
 });
 
-// --- ROTA PARA ATUALIZAR O PERFIL (CORRIGIDA) ---
+/**
+ * @route PUT /profile/update
+ * @description Atualiza o nome ou avatar de um utilizador autenticado.
+ */
 app.put('/profile/update', async (request, reply) => {
     try {
-        // 1. Verifica o token JWT para saber quem é o utilizador
         await request.jwtVerify();
         const userId = request.user.sub;
-
-        // 2. Valida os dados recebidos
-        const updateProfileSchema = z.object({
-            name: z.string().min(3).optional(),
-            avatar_url: z.string().url().optional(),
-        });
         const body = updateProfileSchema.parse(request.body);
 
-        // 3. Monta o objeto de atualização
-        const updateData: { name?: string; avatar_url?: string } = {};
-        if (body.name) updateData.name = body.name;
-        if (body.avatar_url) updateData.avatar_url = body.avatar_url;
-
-        if (Object.keys(updateData).length === 0) {
+        if (Object.keys(body).length === 0) {
             return reply.status(400).send({ message: 'Nenhum dado fornecido para atualização.' });
         }
 
-        // 4. Atualiza os dados na tabela "users"
-        const { data, error } = await supabase
-            .from('users') // CORRIGIDO: de 'profiles' para 'users'
-            .update(updateData)
-            .eq('id', userId)
-            .select()
-            .single();
-
+        const { data, error } = await supabase.from('users').update(body).eq('id', userId).select().single();
         if (error) throw error;
-        
         if (data) delete data.password;
 
         return reply.status(200).send({ user: data });
-
     } catch (error) {
         console.error('Erro ao atualizar perfil:', error);
         if (error instanceof z.ZodError) {
@@ -134,61 +147,68 @@ app.put('/profile/update', async (request, reply) => {
     }
 });
 
+/**
+ * @route POST /forgot-password
+ * @description Inicia o fluxo de redefinição de palavra-passe.
+ */
 app.post("/forgot-password", async (request, reply) => {
     try {
-        const { email } = request.body as { email: string };
+        const { email } = forgotPasswordSchema.parse(request.body);
         const { data: user } = await supabase.from("users").select("id").eq("email", email).single();
-        if (!user) {
-            return { message: "Se um utilizador com este e-mail existir, um link de redefinição será enviado." };
+        
+        if (user) {
+            const resetToken = crypto.randomBytes(32).toString("hex");
+            const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+            const expires = new Date(Date.now() + 3600000); // 1 hora a partir de agora
+
+            await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
+            
+            const resetUrl = `https://lock-front.onrender.com/reset-password/${resetToken}`;
+            const resend = new Resend(process.env.RESEND_API_KEY);
+            await resend.emails.send({
+                from: 'LOCK Platform <onboarding@resend.dev>',
+                to: email,
+                subject: 'O seu Link de Redefinição de Palavra-passe',
+                html: `<p>Clique aqui para redefinir a sua palavra-passe: <a href="${resetUrl}">Redefinir Palavra-passe</a>. Este link expira em 1 hora.</p>`,
+            });
         }
-        
-        const resetToken = crypto.randomBytes(32).toString("hex");
-        const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-        
-        const expires = new Date();
-        expires.setHours(expires.getHours() + 1);
-
-        await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
-        
-        const resetUrl = `https://lock-front.onrender.com/reset-password/${resetToken}`;
-        const resend = new Resend(process.env.RESEND_API_KEY);
-        
-        await resend.emails.send({
-            from: 'LOCK Platform <onboarding@resend.dev>',
-            to: email,
-            subject: 'O seu Link de Redefinição de Palavra-passe',
-            html: `<p>Clique aqui para redefinir a sua palavra-passe: <a href="${resetUrl}">Redefinir Palavra-passe</a>. Este link expira em 1 hora.</p>`,
-        });
-
         return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
     } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        }
         console.error("Erro em forgot-password:", error);
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
 
-// --- ROTA PARA REDEFINIR A SENHA COM O TOKEN ---
+/**
+ * @route POST /reset-password
+ * @description Conclui a redefinição de palavra-passe com um token válido.
+ */
 app.post("/reset-password", async (request, reply) => {
     try {
-        const { token, password } = request.body as { token: string; password: string };
+        const { token, password } = resetPasswordSchema.parse(request.body);
         const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
         
         const { data: user, error } = await supabase.from("users").select("*").eq("reset_token", hashedToken).single();
-        
         if (error || !user || new Date(user.reset_token_expires) < new Date()) {
             return reply.status(400).send({ error: "Token inválido ou expirado." });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-
         await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
         
         return { message: "Palavra-passe redefinida com sucesso!" };
     } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        }
         console.error("Erro em reset-password:", error);
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
+
 
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
@@ -199,4 +219,3 @@ app.listen({
 }).then(() => {
     console.log("🚀 Servidor a rodar com CORS ativado em http://localhost:3333");
 });
-
