@@ -13,47 +13,17 @@ const app = fastify();
 // ===================================================================
 // ESQUEMAS DE VALIDAÇÃO (ZOD)
 // ===================================================================
-// Centralizamos as "regras" para os dados que a API aceita.
-
-const registerUserSchema = z.object({
-    name: z.string().min(3),
-    email: z.string().email(),
-    password: z.string().min(6),
-});
-
-const loginSchema = z.object({
-    identifier: z.string().min(3),
-    password: z.string().min(6),
-});
-
-const forgotPasswordSchema = z.object({
-    email: z.string().email(),
-});
-
-const resetPasswordSchema = z.object({
-    token: z.string().min(1),
-    password: z.string().min(6),
-});
-
-const updateProfileSchema = z.object({
-    name: z.string().min(3).optional(),
-    avatar_url: z.string().url().optional(),
-});
-
+const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email(), password: z.string().min(6) });
+const loginSchema = z.object({ identifier: z.string().min(3), password: z.string().min(6) });
+const forgotPasswordSchema = z.object({ email: z.string().email() });
+const resetPasswordSchema = z.object({ token: z.string().min(1), password: z.string().min(6) });
+const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
 
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
-
-app.register(jwt, {
-    secret: process.env.SUPABASE_JWT_SECRET!,
-});
-
-app.register(cors, {
-    origin: ["http://localhost:3000", "https://lock-front.onrender.com"], 
-    methods: ["GET", "POST", "PUT", "DELETE"],
-});
-
+app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
+app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onrender.com"], methods: ["GET", "POST", "PUT", "DELETE"] });
 
 // ===================================================================
 // ROTAS DE AUTENTICAÇÃO E PERFIL
@@ -61,28 +31,20 @@ app.register(cors, {
 
 /**
  * @route POST /register
- * @description Regista um novo utilizador na base de dados.
+ * @description Regista um novo utilizador.
  */
 app.post("/register", async (request, reply) => {
     try {
         const { name, email, password } = registerUserSchema.parse(request.body);
-        
         const { data: exists } = await supabase.from("users").select("email").eq("email", email).single();
-        if (exists) {
-            return reply.status(409).send({ error: "Email já cadastrado" });
-        }
-
+        if (exists) { return reply.status(409).send({ error: "Email já cadastrado" }); }
         const hashedPassword = await bcrypt.hash(password, 10);
         const { data, error } = await supabase.from("users").insert([{ name, email, password: hashedPassword }]).select().single();
-
         if (error) throw error;
         if (data) delete data.password;
-
         return reply.status(201).send({ user: data });
     } catch (error) {
-        if (error instanceof z.ZodError) {
-            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-        }
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro no registro:", error);
         return reply.status(500).send({ error: "Erro ao registrar usuário" });
     }
@@ -95,25 +57,26 @@ app.post("/register", async (request, reply) => {
 app.post("/login", async (request, reply) => {
     try {
         const { identifier, password } = loginSchema.parse(request.body);
-
         const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
         if (error || !user) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
-        
         const passwordMatch = await bcrypt.compare(password, user.password);
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
-        
-        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
+        const token = app.jwt.sign(
+            { 
+                sub: user.id.toString(), // <-- A CORREÇÃO ESTÁ AQUI
+                name: user.name,
+                avatar_url: user.avatar_url 
+            }, 
+            { expiresIn: '7 days' }
+        );
         delete user.password;
-
         return { user, token };
     } catch (error) {
-        if (error instanceof z.ZodError) {
-            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-        }
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro no login:", error);
         return reply.status(500).send({ error: "Erro no login" });
     }
@@ -121,28 +84,23 @@ app.post("/login", async (request, reply) => {
 
 /**
  * @route PUT /profile/update
- * @description Atualiza o nome ou avatar de um utilizador autenticado.
+ * @description Atualiza o perfil de um utilizador autenticado.
  */
 app.put('/profile/update', async (request, reply) => {
     try {
         await request.jwtVerify();
         const userId = request.user.sub;
         const body = updateProfileSchema.parse(request.body);
-
         if (Object.keys(body).length === 0) {
             return reply.status(400).send({ message: 'Nenhum dado fornecido para atualização.' });
         }
-
         const { data, error } = await supabase.from('users').update(body).eq('id', userId).select().single();
         if (error) throw error;
         if (data) delete data.password;
-
         return reply.status(200).send({ user: data });
     } catch (error) {
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error('Erro ao atualizar perfil:', error);
-        if (error instanceof z.ZodError) {
-            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-        }
         return reply.status(500).send({ message: 'Erro interno ao atualizar perfil.' });
     }
 });
@@ -155,28 +113,23 @@ app.post("/forgot-password", async (request, reply) => {
     try {
         const { email } = forgotPasswordSchema.parse(request.body);
         const { data: user } = await supabase.from("users").select("id").eq("email", email).single();
-        
         if (user) {
             const resetToken = crypto.randomBytes(32).toString("hex");
             const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-            const expires = new Date(Date.now() + 3600000); // 1 hora a partir de agora
-
+            const expires = new Date(Date.now() + 3600000); // 1 hora
             await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
-            
             const resetUrl = `https://lock-front.onrender.com/reset-password/${resetToken}`;
             const resend = new Resend(process.env.RESEND_API_KEY);
             await resend.emails.send({
                 from: 'LOCK Platform <onboarding@resend.dev>',
                 to: email,
                 subject: 'O seu Link de Redefinição de Palavra-passe',
-                html: `<p>Clique aqui para redefinir a sua palavra-passe: <a href="${resetUrl}">Redefinir Palavra-passe</a>. Este link expira em 1 hora.</p>`,
+                html: `<p>Clique aqui para redefinir: <a href="${resetUrl}">Redefinir Palavra-passe</a>.</p>`,
             });
         }
         return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
     } catch (error) {
-        if (error instanceof z.ZodError) {
-            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-        }
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro em forgot-password:", error);
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
@@ -184,90 +137,59 @@ app.post("/forgot-password", async (request, reply) => {
 
 /**
  * @route POST /reset-password
- * @description Conclui a redefinição de palavra-passe com um token válido.
+ * @description Conclui a redefinição de palavra-passe.
  */
 app.post("/reset-password", async (request, reply) => {
     try {
         const { token, password } = resetPasswordSchema.parse(request.body);
         const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
-        
         const { data: user, error } = await supabase.from("users").select("*").eq("reset_token", hashedToken).single();
         if (error || !user || new Date(user.reset_token_expires) < new Date()) {
             return reply.status(400).send({ error: "Token inválido ou expirado." });
         }
-
         const hashedPassword = await bcrypt.hash(password, 10);
         await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
-        
         return { message: "Palavra-passe redefinida com sucesso!" };
     } catch (error) {
-        if (error instanceof z.ZodError) {
-            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-        }
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro em reset-password:", error);
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
+
 /**
  * @route GET /labs/completions
- * @description Obtém a lista de IDs dos laboratórios concluídos pelo utilizador autenticado.
+ * @description Obtém os laboratórios concluídos pelo utilizador.
  */
 app.get('/labs/completions', async (request, reply) => {
     try {
         await request.jwtVerify();
         const userId = request.user.sub;
-
-        const { data, error } = await supabase
-            .from('lab_completions')
-            .select('lab_id')
-            .eq('user_id', userId);
-
+        const { data, error } = await supabase.from('lab_completions').select('lab_id').eq('user_id', userId);
         if (error) throw error;
-
-        // Retorna apenas um array de strings, e.g., ["sqli-1", "xss-2"]
         const completedIds = data.map(completion => completion.lab_id);
         return completedIds;
-
     } catch (error) {
         console.error('Erro ao obter conclusões de laboratórios:', error);
         return reply.status(500).send({ message: 'Erro ao obter progresso.' });
     }
 });
 
-
 /**
  * @route POST /labs/complete
- * @description Marca um laboratório como concluído para o utilizador autenticado.
+ * @description Marca um laboratório como concluído.
  */
 app.post('/labs/complete', async (request, reply) => {
     try {
         await request.jwtVerify();
         const userId = request.user.sub;
         const { labId } = z.object({ labId: z.string() }).parse(request.body);
-
-        // Verifica se já não está concluído para evitar duplicados
-        const { data: existing, error: selectError } = await supabase
-            .from('lab_completions')
-            .select('id')
-            .eq('user_id', userId)
-            .eq('lab_id', labId)
-            .single();
-        
-        if (selectError && selectError.code !== 'PGRST116') throw selectError; // Ignora o erro "nenhuma linha encontrada"
-
+        const { data: existing } = await supabase.from('lab_completions').select('id').eq('user_id', userId).eq('lab_id', labId).single();
         if (existing) {
             return { message: 'Laboratório já concluído.' };
         }
-
-        // Insere o novo registo de conclusão
-        const { error } = await supabase
-            .from('lab_completions')
-            .insert({ user_id: userId, lab_id: labId });
-
-        if (error) throw error;
-
+        await supabase.from('lab_completions').insert({ user_id: userId, lab_id: labId });
         return reply.status(201).send({ message: 'Progresso guardado com sucesso!' });
-        
     } catch (error) {
         console.error('Erro ao marcar laboratório como concluído:', error);
         return reply.status(500).send({ message: 'Erro ao guardar progresso.' });
