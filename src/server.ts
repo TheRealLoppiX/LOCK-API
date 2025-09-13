@@ -58,9 +58,12 @@ app.post("/login", async (request, reply) => {
     try {
         const { identifier, password } = loginSchema.parse(request.body);
         const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
-        if (error || !user) {
+        
+        // CORRIGIDO: Adicionada uma verificação extra para garantir que o 'user' e 'user.id' existem
+        if (error || !user || !user.id) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
+        
         const passwordMatch = await bcrypt.compare(password, user.password);
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
@@ -68,9 +71,6 @@ app.post("/login", async (request, reply) => {
         
         const token = app.jwt.sign(
             { 
-                // =======================================================
-                // A CORREÇÃO DEFINITIVA ESTÁ NESSA LINHA AQUI ABAIXO
-                // =======================================================
                 sub: user.id.toString(),
                 name: user.name,
                 avatar_url: user.avatar_url 
