@@ -208,7 +208,71 @@ app.post("/reset-password", async (request, reply) => {
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
+/**
+ * @route GET /labs/completions
+ * @description Obtém a lista de IDs dos laboratórios concluídos pelo utilizador autenticado.
+ */
+app.get('/labs/completions', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
 
+        const { data, error } = await supabase
+            .from('lab_completions')
+            .select('lab_id')
+            .eq('user_id', userId);
+
+        if (error) throw error;
+
+        // Retorna apenas um array de strings, e.g., ["sqli-1", "xss-2"]
+        const completedIds = data.map(completion => completion.lab_id);
+        return completedIds;
+
+    } catch (error) {
+        console.error('Erro ao obter conclusões de laboratórios:', error);
+        return reply.status(500).send({ message: 'Erro ao obter progresso.' });
+    }
+});
+
+
+/**
+ * @route POST /labs/complete
+ * @description Marca um laboratório como concluído para o utilizador autenticado.
+ */
+app.post('/labs/complete', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { labId } = z.object({ labId: z.string() }).parse(request.body);
+
+        // Verifica se já não está concluído para evitar duplicados
+        const { data: existing, error: selectError } = await supabase
+            .from('lab_completions')
+            .select('id')
+            .eq('user_id', userId)
+            .eq('lab_id', labId)
+            .single();
+        
+        if (selectError && selectError.code !== 'PGRST116') throw selectError; // Ignora o erro "nenhuma linha encontrada"
+
+        if (existing) {
+            return { message: 'Laboratório já concluído.' };
+        }
+
+        // Insere o novo registo de conclusão
+        const { error } = await supabase
+            .from('lab_completions')
+            .insert({ user_id: userId, lab_id: labId });
+
+        if (error) throw error;
+
+        return reply.status(201).send({ message: 'Progresso guardado com sucesso!' });
+        
+    } catch (error) {
+        console.error('Erro ao marcar laboratório como concluído:', error);
+        return reply.status(500).send({ message: 'Erro ao guardar progresso.' });
+    }
+});
 
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
