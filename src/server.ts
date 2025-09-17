@@ -208,6 +208,59 @@ app.post('/labs/complete', async (request, reply) => {
 });
 
 // ===================================================================
+// ROTA DO QUIZ
+// ===================================================================
+
+const getQuizQuestionsSchema = z.object({
+  topic: z.string(),
+  difficulty: z.enum(['fácil', 'médio', 'difícil', 'aleatório']).optional(),
+  limit: z.coerce.number().int().positive().optional().default(10),
+});
+
+/**
+ * @route GET /quiz/questions
+ * @description Obtém uma lista de perguntas aleatórias para um tópico e dificuldade.
+ * @example /quiz/questions?topic=Burp%20Suite&difficulty=fácil&limit=10
+ * @example /quiz/questions?topic=Burp%20Suite&difficulty=aleatório&limit=50
+ */
+app.get('/quiz/questions', async (request, reply) => {
+  try {
+    await request.jwtVerify(); // Protege a rota, exigindo login
+    const { topic, difficulty, limit } = getQuizQuestionsSchema.parse(request.query);
+
+    let query = supabase.from('questions').select('*').eq('topic', topic);
+
+    // Se a dificuldade for especificada (não for 'aleatório'), filtra por ela
+    if (difficulty && difficulty !== 'aleatório') {
+      query = query.eq('difficulty', difficulty);
+    }
+    
+    const { data: questions, error } = await query;
+
+    if (error) throw error;
+
+    if (!questions || questions.length === 0) {
+      return reply.status(404).send({ message: 'Nenhuma pergunta encontrada para este tópico ou dificuldade.' });
+    }
+
+    // Embaralha as perguntas encontradas
+    const shuffled = questions.sort(() => 0.5 - Math.random());
+    
+    // Pega o número de perguntas solicitado (o 'limit')
+    const selectedQuestions = shuffled.slice(0, limit);
+
+    return reply.send(selectedQuestions);
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error("Erro ao buscar perguntas do quiz:", error);
+    return reply.status(500).send({ error: "Erro ao buscar perguntas" });
+  }
+});
+
+// ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
 app.listen({
