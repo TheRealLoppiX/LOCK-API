@@ -162,53 +162,8 @@ app.post("/reset-password", async (request, reply) => {
     }
 });
 
-/**
- * @route GET /labs/completions
- * @description Obtém os laboratórios concluídos pelo utilizador.
- */
-app.get('/labs/completions', async (request, reply) => {
-    try {
-        await request.jwtVerify();
-        const userId = request.user.sub;
-        const { data, error } = await supabase.from('lab_completions').select('lab_id').eq('user_id', userId);
-        if (error) throw error;
-        const completedIds = data.map(completion => completion.lab_id);
-        return completedIds;
-    } catch (error) {
-        console.error('Erro ao obter conclusões de laboratórios:', error);
-        return reply.status(500).send({ message: 'Erro ao obter progresso.' });
-    }
-});
-
-/**
- * @route POST /labs/complete
- * @description Marca um laboratório como concluído.
- */
-app.post('/labs/complete', async (request, reply) => {
-    try {
-        await request.jwtVerify();
-        const userId = request.user.sub;
-        const { labId } = z.object({ labId: z.string() }).parse(request.body);
-        
-        // CORRIGIDO: Usa .maybeSingle() para não dar erro se não encontrar nada.
-        const { data: existing, error: selectError } = await supabase.from('lab_completions').select('id').eq('user_id', userId).eq('lab_id', labId).maybeSingle();
-        if (selectError) throw selectError;
-
-        if (existing) {
-            return { message: 'Laboratório já concluído.' };
-        }
-        const { error: insertError } = await supabase.from('lab_completions').insert({ user_id: userId, lab_id: labId });
-        if (insertError) throw insertError;
-
-        return reply.status(201).send({ message: 'Progresso guardado com sucesso!' });
-    } catch (error) {
-        console.error('Erro ao marcar laboratório como concluído:', error);
-        return reply.status(500).send({ message: 'Erro ao guardar progresso.' });
-    }
-});
-
 // ===================================================================
-// ROTA DO QUIZ
+// ROTA DO QUIZ (COM DEBUG DETALHADO)
 // ===================================================================
 
 const getQuizQuestionsSchema = z.object({
@@ -217,46 +172,59 @@ const getQuizQuestionsSchema = z.object({
   limit: z.coerce.number().int().positive().optional().default(10),
 });
 
-/**
- * @route GET /quiz/questions
- * @description Obtém uma lista de perguntas aleatórias para um tópico e dificuldade.
- * @example /quiz/questions?topic=Burp%20Suite&difficulty=fácil&limit=10
- * @example /quiz/questions?topic=Burp%20Suite&difficulty=aleatório&limit=50
- */
 app.get('/quiz/questions', async (request, reply) => {
   try {
-    await request.jwtVerify(); // Protege a rota, exigindo login
+    console.log("--- [QUIZ DEBUG] Rota /quiz/questions iniciada. ---");
+    
+    await request.jwtVerify();
+    console.log("--- [QUIZ DEBUG] Autenticação do usuário verificada com sucesso. ---");
+
     const { topic, difficulty, limit } = getQuizQuestionsSchema.parse(request.query);
+    console.log(`--- [QUIZ DEBUG] Parâmetros recebidos: topic=${topic}, difficulty=${difficulty}, limit=${limit}`);
 
     let query = supabase.from('questions').select('*').eq('topic', topic);
+    console.log(`--- [QUIZ DEBUG] Montando query inicial para o tópico: ${topic}`);
 
-    // Se a dificuldade for especificada (não for 'aleatório'), filtra por ela
     if (difficulty && difficulty !== 'aleatório') {
       query = query.eq('difficulty', difficulty);
+      console.log(`--- [QUIZ DEBUG] Adicionando filtro de dificuldade: ${difficulty}`);
+    } else {
+      console.log("--- [QUIZ DEBUG] Nenhuma dificuldade específica, buscando todas as dificuldades (aleatório).");
     }
     
+    console.log("--- [QUIZ DEBUG] Executando a query no Supabase... ---");
     const { data: questions, error } = await query;
+    // ===============================================================
+    // ESTES LOGS SÃO OS MAIS IMPORTANTES
+    // ===============================================================
+    console.log("--- [QUIZ DEBUG] Query executada. Resultado: ---");
+    if (error) {
+        console.error("--- [QUIZ DEBUG] ERRO retornado pelo Supabase:", error);
+    } else {
+        console.log(`--- [QUIZ DEBUG] SUCESSO. Número de perguntas encontradas: ${questions?.length}`);
+    }
+    console.log("-----------------------------------------");
+    // ===============================================================
 
     if (error) throw error;
 
     if (!questions || questions.length === 0) {
+      console.log("--- [QUIZ DEBUG] Nenhuma pergunta encontrada. Retornando 404. ---");
       return reply.status(404).send({ message: 'Nenhuma pergunta encontrada para este tópico ou dificuldade.' });
     }
 
-    // Embaralha as perguntas encontradas
+    console.log("--- [QUIZ DEBUG] Embaralhando as perguntas...");
     const shuffled = questions.sort(() => 0.5 - Math.random());
     
-    // Pega o número de perguntas solicitado (o 'limit')
+    console.log(`--- [QUIZ DEBUG] Selecionando as ${limit} primeiras perguntas...`);
     const selectedQuestions = shuffled.slice(0, limit);
 
+    console.log("--- [QUIZ DEBUG] Enviando resposta final. Fim da rota. ---");
     return reply.send(selectedQuestions);
 
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
-    }
-    console.error("Erro ao buscar perguntas do quiz:", error);
-    return reply.status(500).send({ error: "Erro ao buscar perguntas" });
+    console.error("--- [QUIZ DEBUG] ERRO INESPERADO NA ROTA ---", error);
+    return reply.status(500).send({ error: "Erro interno no servidor ao processar o quiz." });
   }
 });
 
