@@ -163,68 +163,41 @@ app.post("/reset-password", async (request, reply) => {
 });
 
 // ===================================================================
-// ROTA DO QUIZ (COM DEBUG DETALHADO)
+// ROTA DO QUIZ
 // ===================================================================
 
 const getQuizQuestionsSchema = z.object({
   topic: z.string(),
-  difficulty: z.enum(['fácil', 'médio', 'difícil', 'aleatório']).optional(),
+  difficulty: z.enum(['fácil', 'médio', 'difícil', 'aleatório', 'temporizado', 'treinamento']), // Atualizado para incluir os modos
   limit: z.coerce.number().int().positive().optional().default(10),
 });
 
 app.get('/quiz/questions', async (request, reply) => {
   try {
-    console.log("--- [QUIZ DEBUG] Rota /quiz/questions iniciada. ---");
-    
-    await request.jwtVerify();
-    console.log("--- [QUIZ DEBUG] Autenticação do usuário verificada com sucesso. ---");
-
+    await request.jwtVerify(); // Protege a rota
     const { topic, difficulty, limit } = getQuizQuestionsSchema.parse(request.query);
-    console.log(`--- [QUIZ DEBUG] Parâmetros recebidos: topic=${topic}, difficulty=${difficulty}, limit=${limit}`);
 
     let query = supabase.from('questions').select('*').eq('topic', topic);
-    console.log(`--- [QUIZ DEBUG] Montando query inicial para o tópico: ${topic}`);
 
-    if (difficulty && difficulty !== 'aleatório') {
+    // Se a dificuldade NÃO for um modo especial, filtra por ela
+    if (difficulty && !['aleatório', 'temporizado', 'treinamento'].includes(difficulty)) {
       query = query.eq('difficulty', difficulty);
-      console.log(`--- [QUIZ DEBUG] Adicionando filtro de dificuldade: ${difficulty}`);
-    } else {
-      console.log("--- [QUIZ DEBUG] Nenhuma dificuldade específica, buscando todas as dificuldades (aleatório).");
     }
     
-    console.log("--- [QUIZ DEBUG] Executando a query no Supabase... ---");
     const { data: questions, error } = await query;
-    // ===============================================================
-    // ESTES LOGS SÃO OS MAIS IMPORTANTES
-    // ===============================================================
-    console.log("--- [QUIZ DEBUG] Query executada. Resultado: ---");
-    if (error) {
-        console.error("--- [QUIZ DEBUG] ERRO retornado pelo Supabase:", error);
-    } else {
-        console.log(`--- [QUIZ DEBUG] SUCESSO. Número de perguntas encontradas: ${questions?.length}`);
-    }
-    console.log("-----------------------------------------");
-    // ===============================================================
-
     if (error) throw error;
 
     if (!questions || questions.length === 0) {
-      console.log("--- [QUIZ DEBUG] Nenhuma pergunta encontrada. Retornando 404. ---");
-      return reply.status(404).send({ message: 'Nenhuma pergunta encontrada para este tópico ou dificuldade.' });
+      return reply.status(404).send({ message: 'Nenhuma pergunta encontrada.' });
     }
 
-    console.log("--- [QUIZ DEBUG] Embaralhando as perguntas...");
     const shuffled = questions.sort(() => 0.5 - Math.random());
-    
-    console.log(`--- [QUIZ DEBUG] Selecionando as ${limit} primeiras perguntas...`);
     const selectedQuestions = shuffled.slice(0, limit);
 
-    console.log("--- [QUIZ DEBUG] Enviando resposta final. Fim da rota. ---");
     return reply.send(selectedQuestions);
-
   } catch (error) {
-    console.error("--- [QUIZ DEBUG] ERRO INESPERADO NA ROTA ---", error);
-    return reply.status(500).send({ error: "Erro interno no servidor ao processar o quiz." });
+    console.error("Erro ao buscar perguntas do quiz:", error);
+    return reply.status(500).send({ error: "Erro ao buscar perguntas" });
   }
 });
 
