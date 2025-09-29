@@ -26,13 +26,10 @@ app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
 app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onrender.com"], methods: ["GET", "POST", "PUT", "DELETE"] });
 
 // ===================================================================
-// ROTAS DE AUTENTICAÇÃO E PERFIL
+// ROTAS
 // ===================================================================
 
-/**
- * @route POST /register
- * @description Regista um novo utilizador.
- */
+/** @route POST /register */
 app.post("/register", async (request, reply) => {
     try {
         const { name, email, password } = registerUserSchema.parse(request.body);
@@ -50,34 +47,19 @@ app.post("/register", async (request, reply) => {
     }
 });
 
-/**
- * @route POST /login
- * @description Autentica um utilizador e retorna um token JWT.
- */
+/** @route POST /login */
 app.post("/login", async (request, reply) => {
     try {
         const { identifier, password } = loginSchema.parse(request.body);
         const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
-        if (error || !user) {
+        if (error || !user || !user.id) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
         const passwordMatch = await bcrypt.compare(password, user.password);
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
-        
-        const token = app.jwt.sign(
-            { 
-                // =======================================================
-                // A CORREÇÃO DEFINITIVA ESTÁ NESTA LINHA AQUI ABAIXO
-                // =======================================================
-                sub: user.id.toString(),
-                name: user.name,
-                avatar_url: user.avatar_url 
-            }, 
-            { expiresIn: '7 days' }
-        );
-
+        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
         delete user.password;
         return { user, token };
     } catch (error) {
@@ -87,10 +69,7 @@ app.post("/login", async (request, reply) => {
     }
 });
 
-/**
- * @route PUT /profile/update
- * @description Atualiza o perfil de um utilizador autenticado.
- */
+/** @route PUT /profile/update */
 app.put('/profile/update', async (request, reply) => {
     try {
         await request.jwtVerify();
@@ -168,7 +147,7 @@ app.post("/reset-password", async (request, reply) => {
 
 const getQuizQuestionsSchema = z.object({
   topic: z.string(),
-  difficulty: z.enum(['fácil', 'médio', 'difícil', 'aleatório', 'temporizado', 'treinamento']), // Atualizado para incluir os modos
+  difficulty: z.enum(['fácil', 'médio', 'difícil', 'aleatório', 'temporizado', 'treinamento']),
   limit: z.coerce.number().int().positive().optional().default(10),
 });
 
