@@ -181,6 +181,125 @@ app.get('/quiz/questions', async (request, reply) => {
 });
 
 // ===================================================================
+// ROTAS DA BIBLIOTECA
+// ===================================================================
+
+/**
+ * @route GET /library/all
+ * @description Busca TODOS os materiais de estudo e o status de cada um
+ * PARA O USUÁRIO LOGADO. Também busca o último material
+ * acessado pelo usuário.
+ */
+app.get('/library/all', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+
+        // 1. Busca todos os materiais da tabela 'materials'
+        const { data: allMaterials, error: materialsError } = await supabase
+            .from('materials')
+            .select('*');
+        if (materialsError) throw materialsError;
+
+        // 2. Busca os status que ESTE usuário salvou
+        const { data: userStatuses, error: statusesError } = await supabase
+            .from('user_materials_status')
+            .select('material_id, status')
+            .eq('user_id', userId);
+        if (statusesError) throw statusesError;
+
+        // 3. Busca o último material acessado por ESTE usuário
+        const { data: userData, error: userError } = await supabase
+            .from('users')
+            .select('last_accessed_material_id')
+            .eq('id', userId)
+            .single();
+        if (userError) throw userError;
+
+        // Combina os status com a lista de todos os materiais
+        const materialsWithStatus = allMaterials.map(material => {
+            const userStatus = userStatuses.find(s => s.material_id === material.id);
+            return {
+                ...material,
+                status: userStatus ? userStatus.status : null // Adiciona o status ou null
+            };
+        });
+
+        return {
+            allMaterials: materialsWithStatus,
+            lastAccessedId: userData.last_accessed_material_id
+        };
+    } catch (error) {
+        console.error('Erro ao buscar dados da biblioteca:', error);
+        return reply.status(500).send({ error: 'Erro ao buscar dados da biblioteca' });
+    }
+});
+
+
+/**
+ * @route PUT /library/status
+ * @description Atualiza ou insere o status de um material para o usuário.
+ * Ex: Mover um livro para a estante "Lendo".
+ */
+app.put('/library/status', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { materialId, status } = z.object({
+            materialId: z.string().uuid(),
+            status: z.string()
+        }).parse(request.body);
+
+        // A função 'upsert' é inteligente:
+        // - Se já existe uma linha para esse user/material, ela ATUALIZA o status.
+        // - Se não existe, ela INSERE uma nova linha.
+        const { error } = await supabase
+            .from('user_materials_status')
+            .upsert({
+                user_id: userId,
+                material_id: materialId,
+                status: status,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'user_id, material_id' });
+
+        if (error) throw error;
+
+        return reply.status(200).send({ message: 'Status atualizado com sucesso' });
+
+    } catch (error) {
+        console.error('Erro ao atualizar status do material:', error);
+        return reply.status(500).send({ error: 'Erro ao atualizar status do material' });
+    }
+});
+
+
+/**
+ * @route PUT /library/last-accessed/:materialId
+ * @description Salva o ID do último material que o usuário clicou.
+ * É a base para a funcionalidade "Continue estudando".
+ */
+app.put('/library/last-accessed/:materialId', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { materialId } = z.object({ materialId: z.string().uuid() }).parse(request.params);
+
+        const { error } = await supabase
+            .from('users')
+            .update({ last_accessed_material_id: materialId })
+            .eq('id', userId);
+
+        if (error) throw error;
+        
+        return reply.status(200).send({ message: 'Último material acessado salvo com sucesso' });
+
+    } catch (error) {
+        console.error('Erro ao salvar último material acessado:', error);
+        return reply.status(500).send({ error: 'Erro ao salvar último material acessado' });
+    }
+});
+
+// ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
 app.listen({
