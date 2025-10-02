@@ -267,6 +267,7 @@ app.put('/library/status', async (request, reply) => {
     }
 });
 
+
 /**
  * @route PUT /library/last-accessed/:materialId
  * @description Salva o ID do último material que o usuário clicou.
