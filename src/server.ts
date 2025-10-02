@@ -250,19 +250,14 @@ app.put('/library/status', async (request, reply) => {
             status: z.string()
         }).parse(request.body);
 
-        // A função 'upsert' é inteligente:
-        // - Se já existe uma linha para esse user/material, ela ATUALIZA o status.
-        // - Se não existe, ela INSERE uma nova linha.
-        const { error } = await supabase
-            .from('user_materials_status')
-            .upsert({
-                user_id: userId,
-                material_id: materialId,
-                status: status,
-                updated_at: new Date().toISOString()
-            }, { onConflict: 'user_id, material_id' });
+        // AGORA, em vez de 'upsert', chamamos nossa função especial via 'rpc'
+        const { error } = await supabase.rpc('update_user_material_status', {
+            p_user_id: userId,
+            p_material_id: materialId,
+            p_status: status
+        });
 
-        if (error) throw error;
+        if (error) throw error; // Se a função der erro, ele será capturado aqui
 
         return reply.status(200).send({ message: 'Status atualizado com sucesso' });
 
@@ -271,7 +266,6 @@ app.put('/library/status', async (request, reply) => {
         return reply.status(500).send({ error: 'Erro ao atualizar status do material' });
     }
 });
-
 
 /**
  * @route PUT /library/last-accessed/:materialId
