@@ -190,51 +190,32 @@ app.get('/quiz/questions', async (request, reply) => {
  * PARA O USUÁRIO LOGADO. Também busca o último material
  * acessado pelo usuário.
  */
+/**
+ * @route GET /library/all
+ * @description Busca TODOS os dados da biblioteca para o usuário logado
+ * chamando uma única função SQL segura.
+ */
 app.get('/library/all', async (request, reply) => {
     try {
         await request.jwtVerify();
         const userId = request.user.sub;
 
-        // 1. Busca todos os materiais da tabela 'materials'
-        const { data: allMaterials, error: materialsError } = await supabase
-            .from('materials')
-            .select('*');
-        if (materialsError) throw materialsError;
-
-        // 2. Busca os status que ESTE usuário salvou
-        const { data: userStatuses, error: statusesError } = await supabase
-            .from('user_materials_status')
-            .select('material_id, status')
-            .eq('user_id', userId);
-        if (statusesError) throw statusesError;
-
-        // 3. Busca o último material acessado por ESTE usuário
-        const { data: userData, error: userError } = await supabase
-            .from('users')
-            .select('last_accessed_material_id')
-            .eq('id', userId)
-            .single();
-        if (userError) throw userError;
-
-        // Combina os status com a lista de todos os materiais
-        const materialsWithStatus = allMaterials.map(material => {
-            const userStatus = userStatuses.find(s => s.material_id === material.id);
-            return {
-                ...material,
-                status: userStatus ? userStatus.status : null // Adiciona o status ou null
-            };
+        // Chama a nossa nova super-função, passando o ID do usuário
+        const { data, error } = await supabase.rpc('get_user_library_data', {
+            p_user_id: userId
         });
 
-        return {
-            allMaterials: materialsWithStatus,
-            lastAccessedId: userData.last_accessed_material_id
-        };
+        if (error) throw error;
+        
+        // A função já retorna o objeto JSON completo e formatado.
+        // A gente só precisa enviá-lo de volta para o site.
+        return data;
+
     } catch (error) {
         console.error('Erro ao buscar dados da biblioteca:', error);
         return reply.status(500).send({ error: 'Erro ao buscar dados da biblioteca' });
     }
 });
-
 
 /**
  * @route PUT /library/status
