@@ -274,35 +274,101 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
         return reply.status(500).send({ error: 'Erro ao salvar último material acessado' });
     }
 });
-/**
- * @route POST /labs/sql-injection
- * @description Rota vulnerável para fins educacionais.
- * NÃO USE ISSO EM PRODUÇÃO!
- */
-app.post('/labs/sql-injection', async (request, reply) => {
+// =====================================================================
+// ROTAS DOS LABORATÓRIOS
+// =====================================================================
+
+// --- SQL INJECTION ---
+app.post('/labs/sql-injection/2', async (request, reply) => { // Nível 2
   const { username, password } = request.body as any;
-
-  if (username.includes("' OR '1'='1") && password.includes("' OR '1'='1")) {
-    return reply.send({ success: true, message: 'Sucesso! Você bypassou a autenticação com um payload de SQL Injection básico.' });
+  if (username === `administrator'--`) {
+    return reply.send({ success: true, message: 'Autenticação bypassada com sucesso! Redirecionando para o painel de controle...' });
   }
-  if (username === 'admin' && password === 'password123') {
-     return reply.send({ success: true, message: 'Login bem-sucedido com credenciais válidas.' });
-  }
-
-  return reply.status(401).send({ success: false, message: 'Credenciais inválidas.' });
+  return reply.status(401).send({ success: false, message: 'Credenciais incorretas.' });
 });
-/**
- * @route POST /labs/brute-force
- * @description Rota vulnerável para fins educacionais.
- * NÃO USE ISSO EM PRODUÇÃO!
- */
-app.post('/labs/brute-force', async (request, reply) => {
-  const { password } = request.body as any;
-  // Simulação: a senha correta é '123'
-  if (password === '123') {
-    return reply.send({ success: true, message: 'Sucesso! Senha "123" encontrada. Em um cenário real, use senhas mais fortes!' });
+
+app.post('/labs/sql-injection/3', async (request, reply) => { // Nível 3
+  const { username, password } = request.body as any;
+  const unionPayload = `' UNION SELECT 'Sup3r_S3cr3t_P4ss', NULL --`;
+  if (username.toLowerCase().includes(unionPayload.toLowerCase())) {
+    return reply.send({ success: true, message: 'Login bem-sucedido! Bem-vindo de volta, Sup3r_S3cr3t_P4ss.' });
+  }
+  return reply.status(401).send({ success: false, message: 'Usuário não encontrado.' });
+});
+
+// --- BRUTE FORCE ---
+app.post('/labs/brute-force/1', async (request, reply) => { // Nível 1
+  const validUsers = ['admin', 'guest'];
+  const { username } = request.body as any;
+  if (validUsers.includes(username)) {
+    return reply.status(401).send({ success: false, message: 'Senha incorreta.' }); // "Sucesso" para o pentester
+  }
+  return reply.status(401).send({ success: false, message: 'Usuário não encontrado.' });
+});
+
+app.post('/labs/brute-force/2', async (request, reply) => { // Nível 2
+  const { username, password } = request.body as any;
+  if (username === 'admin' && password === 'lock') {
+    return reply.send({ success: true, message: 'Acesso concedido! Senha "lock" encontrada.' });
   }
   return reply.status(401).send({ success: false, message: 'Senha incorreta.' });
+});
+
+const bruteForceTracker: { [ip: string]: { attempts: number, lockUntil: number | null } } = {};
+app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
+  const ip = request.ip;
+  if (!bruteForceTracker[ip]) {
+    bruteForceTracker[ip] = { attempts: 0, lockUntil: null };
+  }
+  const tracker = bruteForceTracker[ip];
+
+  if (tracker.lockUntil && Date.now() < tracker.lockUntil) {
+    const timeLeft = Math.ceil((tracker.lockUntil - Date.now()) / 1000);
+    return reply.status(429).send({ success: false, message: `Muitas tentativas falhas. Tente novamente em ${timeLeft} segundos.` });
+  }
+  tracker.lockUntil = null;
+  
+  const { password } = request.body as any;
+  if (password === '4815') {
+    tracker.attempts = 0;
+    return reply.send({ success: true, message: 'Acesso concedido! Proteção de rate limit contornada.' });
+  } else {
+    tracker.attempts++;
+    if (tracker.attempts >= 3) {
+      tracker.lockUntil = Date.now() + 60000;
+      tracker.attempts = 0;
+      return reply.status(429).send({ success: false, message: `Muitas tentativas falhas. Tente novamente em 60 segundos.` });
+    }
+    return reply.status(401).send({ success: false, message: 'Credenciais incorretas.' });
+  }
+});
+
+
+// --- XSS ---
+// (XSS Nível 1 é Frontend-Puro, não precisa de rota)
+
+// Simulação de "banco de dados" de comentários para os labs de XSS
+const xssCommentsDb: { author: string, site: string, comment: string }[] = [];
+const xssCommentsDbFiltered: { author: string, site: string, comment: string }[] = [];
+
+app.post('/labs/xss/2', async (request, reply) => { // Nível 2 - Salvar comentário
+  const { author, site, comment } = request.body as any;
+  xssCommentsDb.push({ author, site, comment });
+  return reply.send({ success: true });
+});
+app.get('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Buscar comentários
+  return reply.send(xssCommentsDb);
+});
+
+app.post('/labs/xss/3', async (request, reply) => { // Nível 3 - Salvar comentário com filtro
+  let { author, site, comment } = request.body as any;
+  // Filtro ingênuo
+  site = site.replace(/alert/gi, "").replace(/<script>/gi, "");
+  xssCommentsDbFiltered.push({ author, site, comment });
+  return reply.send({ success: true });
+});
+app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar comentários filtrados
+  return reply.send(xssCommentsDbFiltered);
 });
 
 // ===================================================================
