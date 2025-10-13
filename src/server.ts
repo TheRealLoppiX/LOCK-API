@@ -274,6 +274,36 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
         return reply.status(500).send({ error: 'Erro ao salvar último material acessado' });
     }
 });
+/**
+ * @route POST /labs/sql-injection
+ * @description Rota vulnerável para fins educacionais.
+ * NÃO USE ISSO EM PRODUÇÃO!
+ */
+app.post('/labs/sql-injection', async (request, reply) => {
+  const { username, password } = request.body as any;
+
+  if (username.includes("' OR '1'='1") && password.includes("' OR '1'='1")) {
+    return reply.send({ success: true, message: 'Sucesso! Você bypassou a autenticação com um payload de SQL Injection básico.' });
+  }
+  if (username === 'admin' && password === 'password123') {
+     return reply.send({ success: true, message: 'Login bem-sucedido com credenciais válidas.' });
+  }
+
+  return reply.status(401).send({ success: false, message: 'Credenciais inválidas.' });
+});
+/**
+ * @route POST /labs/brute-force
+ * @description Rota vulnerável para fins educacionais.
+ * NÃO USE ISSO EM PRODUÇÃO!
+ */
+app.post('/labs/brute-force', async (request, reply) => {
+  const { password } = request.body as any;
+  // Simulação: a senha correta é '123'
+  if (password === '123') {
+    return reply.send({ success: true, message: 'Sucesso! Senha "123" encontrada. Em um cenário real, use senhas mais fortes!' });
+  }
+  return reply.status(401).send({ success: false, message: 'Senha incorreta.' });
+});
 
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
