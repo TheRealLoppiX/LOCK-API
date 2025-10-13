@@ -279,6 +279,25 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
 // =====================================================================
 
 // --- SQL INJECTION ---
+app.post('/labs/sql-injection/1', async (request, reply) => {
+  const { username, password } = request.body as any;
+
+  // Lógica de Sucesso: Verifica a presença de uma aspa simples
+  if (username?.includes("'") || password?.includes("'")) {
+    // Retorna um status 500, mas com uma mensagem de sucesso no corpo
+    // para o frontend interpretar como a conclusão do laboratório.
+    return reply.status(500).send({
+      success: true,
+      message: 'Internal Server Error: Erro na sintaxe da sua consulta SQL. O banco de dados parece ser vulnerável.'
+    });
+  }
+
+  // Mensagem de Falha Padrão para qualquer outra entrada
+  return reply.status(401).send({
+    success: false,
+    message: 'Usuário ou senha inválidos.'
+  });
+});
 app.post('/labs/sql-injection/2', async (request, reply) => { // Nível 2
   const { username, password } = request.body as any;
   if (username === `administrator'--`) {
