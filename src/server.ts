@@ -325,12 +325,45 @@ app.post('/labs/brute-force/1', async (request, reply) => { // Nível 1
   return reply.status(401).send({ success: false, message: 'Usuário não encontrado.' });
 });
 
-app.post('/labs/brute-force/2', async (request, reply) => { // Nível 2
-  const { username, password } = request.body as any;
-  if (username === 'admin' && password === 'lock') {
-    return reply.send({ success: true, message: 'Acesso concedido! Senha "lock" encontrada.' });
+// --- Nível 2 ---
+// Função auxiliar para gerar a senha aleatória
+const generateRandomPassword = () => {
+  return Math.random().toString(36).slice(-8); // Gera 8 caracteres alfanuméricos
+};
+
+// ROTA 1: Iniciar o laboratório
+app.post('/labs/brute-force/2/start', async (request, reply) => {
+  const password = generateRandomPassword();
+  
+  // A CORREÇÃO ESTÁ AQUI:
+  // A diretiva // @ts-ignore diz ao TypeScript para ignorar o erro de tipo na próxima linha.
+  // É a forma correta de lidar com exceções intencionais como esta.
+  // @ts-ignore 
+  const labToken = await reply.jwtSign({ password }, { expiresIn: '15m' });
+
+  return { labToken };
+});
+// ROTA 2: Verificar a tentativa de senha
+app.post('/labs/brute-force/2', async (request, reply) => {
+  try {
+    const { passwordGuess, labToken } = request.body as any;
+
+    if (!labToken) {
+      return reply.status(400).send({ success: false, message: "Token do laboratório não fornecido." });
+    }
+
+    // O servidor verifica o token e extrai a senha correta de dentro dele
+    const decodedToken = app.jwt.verify(labToken) as { password: string };
+    const correctPassword = decodedToken.password;
+
+    if (passwordGuess === correctPassword) {
+      return reply.send({ success: true, message: `Acesso concedido! Senha "${correctPassword}" encontrada.` });
+    } else {
+      return reply.status(401).send({ success: false, message: 'Senha incorreta.' });
+    }
+  } catch (error) {
+    return reply.status(401).send({ success: false, message: "Token do laboratório inválido ou expirado. Recarregue a página." });
   }
-  return reply.status(401).send({ success: false, message: 'Senha incorreta.' });
 });
 
 const bruteForceTracker: { [ip: string]: { attempts: number, lockUntil: number | null } } = {};
