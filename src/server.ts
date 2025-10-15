@@ -156,8 +156,14 @@ app.get('/quiz/questions', async (request, reply) => {
     await request.jwtVerify(); // Protege a rota
     const { topic, difficulty, limit } = getQuizQuestionsSchema.parse(request.query);
 
-    let query = supabase.from('questions').select('*').eq('topic', topic);
+    // Inicia a query base
+    let query = supabase.from('questions').select('*');
 
+    // Apenas aplica o filtro de tópico se o tema NÃO for 'variado'
+    if (topic !== 'variado') {
+      query = query.eq('topic', topic);
+    }
+    
     // Se a dificuldade NÃO for um modo especial, filtra por ela
     if (difficulty && !['aleatório', 'temporizado', 'treinamento'].includes(difficulty)) {
       query = query.eq('difficulty', difficulty);
@@ -170,6 +176,7 @@ app.get('/quiz/questions', async (request, reply) => {
       return reply.status(404).send({ message: 'Nenhuma pergunta encontrada.' });
     }
 
+    // Embaralha e limita os resultados
     const shuffled = questions.sort(() => 0.5 - Math.random());
     const selectedQuestions = shuffled.slice(0, limit);
 
