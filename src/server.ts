@@ -30,21 +30,59 @@ app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onren
 // ===================================================================
 
 /** @route POST /register */
-app.post("/register", async (request, reply) => {
-    try {
-        const { name, email, password } = registerUserSchema.parse(request.body);
-        const { data: exists } = await supabase.from("users").select("email").eq("email", email).single();
-        if (exists) { return reply.status(409).send({ error: "Email já cadastrado" }); }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const { data, error } = await supabase.from("users").insert([{ name, email, password: hashedPassword }]).select().single();
-        if (error) throw error;
-        if (data) delete data.password;
-        return reply.status(201).send({ user: data });
-    } catch (error) {
-        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
-        console.error("Erro no registro:", error);
-        return reply.status(500).send({ error: "Erro ao registrar usuário" });
+app.post('/register', async (request, reply) => {
+  try {
+    const { name, email, password } = registerUserSchema.parse(request.body);
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert({
+        name,
+        email,
+        hashed_password: hashedPassword,
+        avatar_url: `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(name)}`
+      })
+      .select('id, name, email, avatar_url')
+      .single();
+
+    // ======================================================
+    // ESTA É A MUDANÇA QUE VALIDA A DUPLICIDADE
+    // ======================================================
+    if (insertError) {
+      // '23505' é o código de erro padrão do PostgreSQL para "unique_violation"
+      if (insertError.code === '23505') {
+        return reply.status(409).send({ message: "Este e-mail já está cadastrado." });
+      }
+      
+      // Se for outro tipo de erro, loga e lança
+      console.error("Erro ao inserir usuário no Supabase:", insertError);
+      throw new Error("Falha ao criar usuário no banco de dados.");
     }
+    // ======================================================
+
+    if (!newUser) {
+      throw new Error("Falha ao criar usuário, dados não retornados.");
+    }
+
+    const token = app.jwt.sign({
+      sub: newUser.id.toString(),
+      name: newUser.name,
+      email: newUser.email,
+      avatar_url: newUser.avatar_url,
+    });
+
+    return reply.status(201).send({ token });
+
+  } catch (error: any) {
+    // Se o erro for do Zod (validação)
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: "Dados inválidos.", details: error.issues });
+    }
+    // Pega qualquer outra mensagem de erro (como a do 409 que criamos)
+    return reply.status(error.statusCode || 500).send({ message: error.message || "Erro interno do servidor" });
+  }
 });
 
 /** @route POST /login */
@@ -59,7 +97,7 @@ app.post("/login", async (request, reply) => {
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
-        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
+        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, email: user.email, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
         delete user.password;
         return { user, token };
     } catch (error) {

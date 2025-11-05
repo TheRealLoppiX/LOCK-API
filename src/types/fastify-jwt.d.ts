@@ -1,17 +1,17 @@
 import '@fastify/jwt';
 
 declare module '@fastify/jwt' {
-  // Este interface define o que está DENTRO do nosso token
   interface FastifyJWT {
     payload: {
-      sub: string; // O ID do utilizador
+      sub: string;
       name: string;
+      email: string; // <-- A LINHA QUE FALTAVA
       avatar_url?: string;
     };
-    // O `request.user` será um atalho para a payload
     user: {
       sub: string;
       name: string;
+      email: string; // <-- E A LINHA QUE FALTAVA AQUI
       avatar_url?: string;
     };
   }
