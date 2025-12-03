@@ -23,7 +23,7 @@ const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avata
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
-app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onrender.com"], methods: ["GET", "POST", "PUT", "DELETE"] });
+app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onrender.com", "null"], methods: ["GET", "POST", "PUT", "DELETE"] });
 
 // ===================================================================
 // ROTAS
@@ -93,7 +93,7 @@ app.post("/login", async (request, reply) => {
         if (error || !user || !user.id) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
-        const passwordMatch = await bcrypt.compare(password, user.password);
+        const passwordMatch = await bcrypt.compare(password, user.hashed_password);
         if (!passwordMatch) {
             return reply.status(401).send({ error: "Credenciais inválidas" });
         }
