@@ -106,27 +106,36 @@ app.post('/register', async (request, reply) => {
 
 /** @route POST /login */
 app.post("/login", async (request, reply) => {
+    console.log("📥 Tentativa de login recebida:", request.body); // LOG 1
+
     try {
         const { identifier, password } = loginSchema.parse(request.body);
-        
-        // Busca usuário
         const { data: user, error } = await supabase
             .from("users")
             .select("*")
-            .or(`email.eq.${identifier},name.eq.${identifier}`)
-            .single();
+            .or(`email.eq."${identifier}",name.eq."${identifier}"`) 
+            .maybeSingle();
 
-        // Se não achar usuário
-        if (error || !user || !user.id) {
-            // MUDANÇA AQUI: troquei 'error' por 'message'
-            return reply.status(401).send({ message: "Credenciais inválidas" });
+        if (error) {
+            console.error("❌ Erro no Supabase:", error); // LOG DE ERRO REAL
+            return reply.status(500).send({ message: "Erro ao consultar banco de dados." });
         }
 
-        // Verifica senha
+        if (!user) {
+            console.log("⚠️ Usuário não encontrado:", identifier);
+            return reply.status(401).send({ message: "Credenciais inválidas (Usuário não existe)" });
+        }
+
+        // Verifica se a senha existe no banco (para usuários criados via OAuth/Google que não têm senha)
+        if (!user.hashed_password) {
+             return reply.status(401).send({ message: "Este usuário não possui senha configurada." });
+        }
+
         const passwordMatch = await bcrypt.compare(password, user.hashed_password);
+        
         if (!passwordMatch) {
-            // MUDANÇA AQUI: troquei 'error' por 'message'
-            return reply.status(401).send({ message: "Credenciais inválidas" });
+            console.log("⚠️ Senha incorreta para:", identifier);
+            return reply.status(401).send({ message: "Credenciais inválidas (Senha incorreta)" });
         }
 
         // Gera token
@@ -137,19 +146,19 @@ app.post("/login", async (request, reply) => {
             avatar_url: user.avatar_url 
         }, { expiresIn: '7 days' });
 
-        delete user.password;
+        // Remove a senha antes de enviar pro front
+        delete user.hashed_password;
         
-        // Retorna sucesso
+        console.log("✅ Login Sucesso:", user.email);
         return { user, token };
 
     } catch (error) {
         if (error instanceof z.ZodError) { 
-            // Zod já retorna 'message', está ok
             return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); 
         }
-        console.error("Erro no login:", error);
-        // MUDANÇA AQUI: troquei 'error' por 'message'
-        return reply.status(500).send({ message: "Erro interno no login" });
+        console.error("🔥 EXCEÇÃO CRÍTICA NO LOGIN:", error); 
+        
+        return reply.status(500).send({ message: "Erro interno no servidor ao tentar logar." });
     }
 });
 
