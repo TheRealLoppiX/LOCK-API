@@ -108,21 +108,48 @@ app.post('/register', async (request, reply) => {
 app.post("/login", async (request, reply) => {
     try {
         const { identifier, password } = loginSchema.parse(request.body);
-        const { data: user, error } = await supabase.from("users").select("*").or(`email.eq.${identifier},name.eq.${identifier}`).single();
+        
+        // Busca usuário
+        const { data: user, error } = await supabase
+            .from("users")
+            .select("*")
+            .or(`email.eq.${identifier},name.eq.${identifier}`)
+            .single();
+
+        // Se não achar usuário
         if (error || !user || !user.id) {
-            return reply.status(401).send({ error: "Credenciais inválidas" });
+            // MUDANÇA AQUI: troquei 'error' por 'message'
+            return reply.status(401).send({ message: "Credenciais inválidas" });
         }
+
+        // Verifica senha
         const passwordMatch = await bcrypt.compare(password, user.hashed_password);
         if (!passwordMatch) {
-            return reply.status(401).send({ error: "Credenciais inválidas" });
+            // MUDANÇA AQUI: troquei 'error' por 'message'
+            return reply.status(401).send({ message: "Credenciais inválidas" });
         }
-        const token = app.jwt.sign({ sub: user.id.toString(), name: user.name, email: user.email, avatar_url: user.avatar_url }, { expiresIn: '7 days' });
+
+        // Gera token
+        const token = app.jwt.sign({ 
+            sub: user.id.toString(), 
+            name: user.name, 
+            email: user.email, 
+            avatar_url: user.avatar_url 
+        }, { expiresIn: '7 days' });
+
         delete user.password;
+        
+        // Retorna sucesso
         return { user, token };
+
     } catch (error) {
-        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
+        if (error instanceof z.ZodError) { 
+            // Zod já retorna 'message', está ok
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); 
+        }
         console.error("Erro no login:", error);
-        return reply.status(500).send({ error: "Erro no login" });
+        // MUDANÇA AQUI: troquei 'error' por 'message'
+        return reply.status(500).send({ message: "Erro interno no login" });
     }
 });
 
@@ -487,6 +514,12 @@ app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar
   return reply.send(xssCommentsDbFiltered);
 });
 
+// ===================================================================
+// ROTA DE HEALTH CHECKING
+// ===================================================================
+app.get('/ping', async (request, reply) => {
+  return reply.send({ message: 'pong' });
+});
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
