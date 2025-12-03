@@ -23,7 +23,26 @@ const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avata
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
 app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
-app.register(cors, { origin: ["http://localhost:3000", "https://lock-front.onrender.com", "null"], methods: ["GET", "POST", "PUT", "DELETE"] });
+app.register(cors, {
+  origin: (origin, cb) => {
+    const allowed = [
+      "http://localhost:3000",
+      "https://lock-front.onrender.com"
+    ];
+
+    // mobile (origin === undefined)
+    if (!origin) return cb(null, true);
+
+    // web origins
+    if (allowed.includes(origin)) return cb(null, true);
+
+    // bloquear outros
+    return cb(new Error("Not allowed by CORS"), false);
+  },
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+});
+
 
 // ===================================================================
 // ROTAS
