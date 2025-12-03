@@ -48,6 +48,12 @@ app.register(cors, {
 // ROTAS
 // ===================================================================
 
+// ===================================================================
+// ROTA DE HEALTH CHECKING
+// ===================================================================
+app.get('/ping', async (request, reply) => {
+  return reply.send({ message: 'pong' });
+});
 /** @route POST /register */
 app.post('/register', async (request, reply) => {
   try {
@@ -60,7 +66,7 @@ app.post('/register', async (request, reply) => {
       .insert({
         name,
         email,
-        hashed_password: hashedPassword,
+        password: hashedPassword,
         avatar_url: `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(name)}`
       })
       .select('id, name, email, avatar_url')
@@ -127,11 +133,11 @@ app.post("/login", async (request, reply) => {
         }
 
         // Verifica se a senha existe no banco (para usuários criados via OAuth/Google que não têm senha)
-        if (!user.hashed_password) {
+        if (!user.password) {
              return reply.status(401).send({ message: "Este usuário não possui senha configurada." });
         }
 
-        const passwordMatch = await bcrypt.compare(password, user.hashed_password);
+        const passwordMatch = await bcrypt.compare(password, user.password);
         
         if (!passwordMatch) {
             console.log("⚠️ Senha incorreta para:", identifier);
@@ -147,7 +153,7 @@ app.post("/login", async (request, reply) => {
         }, { expiresIn: '7 days' });
 
         // Remove a senha antes de enviar pro front
-        delete user.hashed_password;
+        delete user.password;
         
         console.log("✅ Login Sucesso:", user.email);
         return { user, token };
@@ -523,12 +529,6 @@ app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar
   return reply.send(xssCommentsDbFiltered);
 });
 
-// ===================================================================
-// ROTA DE HEALTH CHECKING
-// ===================================================================
-app.get('/ping', async (request, reply) => {
-  return reply.send({ message: 'pong' });
-});
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
