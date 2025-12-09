@@ -521,7 +521,7 @@ app.get('/create-super-admin', async (request, reply) => {
         const { error } = await supabase.from("users").insert({
             name: adminLogin,
             email: null, // Como você pediu
-            hashed_password: hashedPassword,
+            password: hashedPassword,
             is_admin: true, // A flag mágica
             avatar_url: "https://api.dicebear.com/8.x/bottts/svg?seed=ADMINLOCK"
         });
