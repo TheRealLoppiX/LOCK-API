@@ -505,7 +505,7 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
 // ===================================================================
 // ROTA DE CRIAÇÃO DO SUPER ADMIN (EXECUTE UMA VEZ E DEPOIS REMOVA/COMENTE)
 // ===================================================================
-app.post('/create-super-admin', async (request, reply) => {
+app.get('/create-super-admin', async (request, reply) => {
     const adminLogin = "IFSPEFKFFILAVFALOCK";
     const adminPass = "$%IFSPEFKFFILAVFALOCK%#$2025";
 
