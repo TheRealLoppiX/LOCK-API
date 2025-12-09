@@ -529,10 +529,11 @@ app.get('/create-super-admin', async (request, reply) => {
         if (error) throw error;
 
         return reply.send({ message: "👑 Super Admin criado com sucesso!" });
-    } catch (error) {
-        console.error(error);
-        return reply.status(500).send({ error: "Erro ao criar admin" });
-    }
+      } catch (error) {
+        console.error("ERRO DETALHADO:", error); // Mostra no terminal
+        // Mostra na tela do navegador também:
+        return reply.status(500).send({ error: "Erro ao criar admin", details: error });
+   }
 });
 
 // --- XSS ---
