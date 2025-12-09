@@ -149,7 +149,8 @@ app.post("/login", async (request, reply) => {
             sub: user.id.toString(), 
             name: user.name, 
             email: user.email, 
-            avatar_url: user.avatar_url 
+            avatar_url: user.avatar_url,
+            is_admin: user.is_admin || false
         }, { expiresIn: '7 days' });
 
         // Remove a senha antes de enviar pro front
@@ -501,6 +502,38 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
   }
 });
 
+// ===================================================================
+// ROTA DE CRIAÇÃO DO SUPER ADMIN (EXECUTE UMA VEZ E DEPOIS REMOVA/COMENTE)
+// ===================================================================
+app.post('/create-super-admin', async (request, reply) => {
+    const adminLogin = "IFSPEFKFFILAVFALOCK";
+    const adminPass = "$%IFSPEFKFFILAVFALOCK%#$2025";
+
+    try {
+        // Verifica se já existe
+        const { data: exists } = await supabase.from("users").select("id").eq("name", adminLogin).single();
+        if (exists) return reply.send({ message: "Admin já existe!" });
+
+        // Criptografa a senha
+        const hashedPassword = await bcrypt.hash(adminPass, 10);
+
+        // Insere no banco forçando is_admin = true e email = null
+        const { error } = await supabase.from("users").insert({
+            name: adminLogin,
+            email: null, // Como você pediu
+            hashed_password: hashedPassword,
+            is_admin: true, // A flag mágica
+            avatar_url: "https://api.dicebear.com/8.x/bottts/svg?seed=ADMINLOCK"
+        });
+
+        if (error) throw error;
+
+        return reply.send({ message: "👑 Super Admin criado com sucesso!" });
+    } catch (error) {
+        console.error(error);
+        return reply.status(500).send({ error: "Erro ao criar admin" });
+    }
+});
 
 // --- XSS ---
 // (XSS Nível 1 é Frontend-Puro, não precisa de rota)
