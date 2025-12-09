@@ -18,6 +18,13 @@ const loginSchema = z.object({ identifier: z.string().min(3), password: z.string
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const resetPasswordSchema = z.object({ token: z.string().min(1), password: z.string().min(6) });
 const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
+const createQuestionSchema = z.object({
+  topic: z.string(),
+  difficulty: z.string(),
+  question: z.string().min(5),
+  options: z.array(z.string()).length(4), // Exige exatamente 4 opções
+  correct_answer: z.string()
+});
 
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
@@ -499,6 +506,49 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
       return reply.status(429).send({ success: false, message: `Muitas tentativas falhas. Tente novamente em 60 segundos.` });
     }
     return reply.status(401).send({ success: false, message: 'Credenciais incorretas.' });
+  }
+});
+
+app.post('/admin/questions', async (request, reply) => {
+  try {
+    // 1. Verifica quem está chamando
+    await request.jwtVerify();
+    const user = request.user;
+
+    // 2. Verifica se é Admin (Segurança Crucial)
+    if (!user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado. Apenas administradores." });
+    }
+
+    // 3. Valida os dados enviados
+    const body = createQuestionSchema.parse(request.body);
+
+    // 4. Valida se a resposta correta está dentro das opções (evita erro humano)
+    if (!body.options.includes(body.correct_answer)) {
+      return reply.status(400).send({ message: "A resposta correta deve ser uma das opções fornecidas." });
+    }
+
+    // 5. Insere no banco
+    const { error } = await supabase
+      .from('questions')
+      .insert({
+        topic: body.topic,
+        difficulty: body.difficulty,
+        question: body.question,
+        options: body.options, // O Supabase converte array JS para JSONB automaticamente
+        correct_answer: body.correct_answer
+      });
+
+    if (error) throw error;
+
+    return reply.status(201).send({ message: "Questão cadastrada com sucesso!" });
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: "Dados inválidos.", issues: error.format() });
+    }
+    console.error("Erro ao cadastrar questão:", error);
+    return reply.status(500).send({ message: "Erro interno ao salvar questão." });
   }
 });
 
