@@ -7,12 +7,14 @@ declare module '@fastify/jwt' {
       name: string;
       email: string; // <-- A LINHA QUE FALTAVA
       avatar_url?: string;
+      is_admin?: boolean;
     };
     user: {
       sub: string;
       name: string;
       email: string; // <-- E A LINHA QUE FALTAVA AQUI
       avatar_url?: string;
+      is_admin?: boolean;
     };
   }
 }
