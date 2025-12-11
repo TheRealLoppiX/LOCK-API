@@ -556,8 +556,8 @@ app.post('/admin/questions', async (request, reply) => {
 // ROTA DE CRIAÇÃO DO SUPER ADMIN
 // ===================================================================
 {/* app.get('/create-super-admin', async (request, reply) => {
-    const adminLogin = "IFSPEFKFFILAVFALOCK";
-    const adminPass = "$%IFSPEFKFFILAVFALOCK%#$2025";
+    const adminLogin = "";
+    const adminPass = "";
 
     try {
         // Verifica se já existe
