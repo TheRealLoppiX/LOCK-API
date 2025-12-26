@@ -25,6 +25,15 @@ const createQuestionSchema = z.object({
   options: z.array(z.string()).length(4), // Exige exatamente 4 opções
   correct_answer: z.string()
 });
+const createMaterialSchema = z.object({
+  title: z.string().min(3),
+  author: z.string().min(2),
+  synopsis: z.string().optional(),
+  type: z.enum(['Livro', 'Artigo', 'PDF', 'Apostila']), // Tipos permitidos
+  cover_url: z.string().url(), // Tem que ser um link válido
+  pdf_url: z.string().url(),   // Tem que ser um link válido
+  total_pages: z.coerce.number().min(1).optional(), // Converte string pra number se vier do form
+});
 
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
@@ -586,6 +595,45 @@ app.post('/admin/questions', async (request, reply) => {
    }
 });
 */}
+app.post('/admin/materials', async (request, reply) => {
+  try {
+    // 1. Segurança: Verifica Token e se é Admin
+    await request.jwtVerify();
+    const user = request.user;
+
+    if (!user.is_admin) {
+      return reply.status(403).send({ message: "⛔ Acesso negado. Apenas administradores." });
+    }
+
+    // 2. Validação dos dados
+    const body = createMaterialSchema.parse(request.body);
+
+    // 3. Inserção no Supabase
+    // Nota: Mapeamos os campos do form para as colunas da tabela 'books'
+    const { error } = await supabase
+      .from('books')
+      .insert({
+        title: body.title,
+        author: body.author,
+        synopsis: body.synopsis,
+        type: body.type,
+        cover_url: body.cover_url,
+        pdf_url: body.pdf_url, // O link do arquivo (Storage)
+        total_pages: body.total_pages || 0
+      });
+
+    if (error) throw error;
+
+    return reply.status(201).send({ message: "📚 Material cadastrado com sucesso!" });
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: "Dados inválidos.", issues: error.format() });
+    }
+    console.error("Erro ao cadastrar material:", error);
+    return reply.status(500).send({ message: "Erro interno ao salvar material." });
+  }
+});
 // --- XSS ---
 // (XSS Nível 1 é Frontend-Puro, não precisa de rota)
 
