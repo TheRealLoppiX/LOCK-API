@@ -40,22 +40,8 @@ const createMaterialSchema = z.object({
 // ===================================================================
 app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
 app.register(cors, {
-  origin: (origin, cb) => {
-    const allowed = [
-      "http://localhost:3000",
-      "https://lock-front.onrender.com"
-    ];
-
-    // mobile (origin === undefined)
-    if (!origin) return cb(null, true);
-
-    // web origins
-    if (allowed.includes(origin)) return cb(null, true);
-
-    // bloquear outros
-    return cb(new Error("Not allowed by CORS"), false);
-  },
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  origin: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true
 });
 
@@ -609,7 +595,6 @@ app.post('/admin/materials', async (request, reply) => {
     const body = createMaterialSchema.parse(request.body);
 
     // 3. Inserção no Supabase
-    // Nota: Mapeamos os campos do form para as colunas da tabela 'books'
     const { error } = await supabase
       .from('books')
       .insert({
@@ -618,7 +603,7 @@ app.post('/admin/materials', async (request, reply) => {
         synopsis: body.synopsis,
         type: body.type,
         cover_url: body.cover_url,
-        pdf_url: body.pdf_url, // O link do arquivo (Storage)
+        pdf_url: body.pdf_url, 
         total_pages: body.total_pages || 0
       });
 
