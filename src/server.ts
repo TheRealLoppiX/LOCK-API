@@ -32,7 +32,7 @@ const createMaterialSchema = z.object({
   type: z.enum(['Livro', 'Artigo', 'PDF', 'Apostila']), // Tipos permitidos
   cover_url: z.string().url(), // Tem que ser um link válido
   pdf_url: z.string().url(),   // Tem que ser um link válido
-  total_pages: z.coerce.number().min(1).optional(), // Converte string pra number se vier do form
+  total_pages: z.coerce.number().optional(), // Converte string pra number se vier do form
 });
 
 // ===================================================================
