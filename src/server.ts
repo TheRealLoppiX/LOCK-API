@@ -107,7 +107,7 @@ app.post('/register', async (request, reply) => {
     if (error instanceof z.ZodError) {
       return reply.status(400).send({ message: "Dados inválidos.", details: error.issues });
     }
-    // Pega qualquer outra mensagem de erro (como a do 409 que criamos)
+    // Pega qualquer outra mensagem de erro
     return reply.status(error.statusCode || 500).send({ message: error.message || "Erro interno do servidor" });
   }
 });
@@ -351,9 +351,12 @@ app.put('/library/status', async (request, reply) => {
 
         return reply.status(200).send({ message: 'Status atualizado com sucesso' });
 
-    } catch (error) {
+    } catch (error:any) {
         console.error('Erro ao atualizar status do material:', error);
-        return reply.status(500).send({ error: 'Erro ao atualizar status do material' });
+        return reply.status(500).send({ 
+            error: 'Erro ao atualizar status',
+            details: error.message || error 
+        });
     }
 });
 
