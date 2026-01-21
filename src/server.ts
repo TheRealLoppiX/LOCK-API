@@ -266,6 +266,69 @@ app.get('/modules', async (request, reply) => {
     return reply.status(500).send({ message: "Erro ao carregar simulados." });
   }
 });
+app.get('/modules/:id/questions', async (request, reply) => {
+  try {
+    // Valida o ID da URL
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    // 1. Busca dados do módulo (Título, Dificuldade, etc)
+    const { data: moduleData, error: moduleError } = await supabase
+      .from('exam_modules')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (moduleError) return reply.status(404).send({ message: "Simulado não encontrado." });
+
+    // 2. Busca as questões vinculadas a esse módulo
+    // ATENÇÃO: Verifique se sua tabela chama 'questions' ou 'quiz_questions'
+    const { data: questions, error: qError } = await supabase
+      .from('questions') 
+      // Selecionamos o ÍNDICE da resposta correta (ajuste conforme seu banco)
+      .select('id, question, options, correct_answer_index') 
+      .eq('module_id', id);
+
+    if (qError) throw qError;
+
+    return { module: moduleData, questions };
+
+  } catch (error) {
+    console.error("Erro ao buscar prova:", error);
+    return reply.status(500).send({ message: "Erro interno ao carregar simulado." });
+  }
+});
+
+// ===================================================================
+// ROTA: SALVAR RESULTADO DO SIMULADO
+// ===================================================================
+app.post('/modules/:id/attempt', async (request, reply) => {
+  try {
+    await request.jwtVerify(); // Exige login
+    
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({
+      score: z.number(),
+      total_questions: z.number()
+    }).parse(request.body);
+
+    const { error } = await supabase
+      .from('user_exam_attempts')
+      .insert({
+        user_id: request.user.sub,
+        module_id: id,
+        score: body.score,
+        total_questions: body.total_questions
+      });
+
+    if (error) throw error;
+
+    return reply.status(201).send({ message: "Resultado salvo!" });
+
+  } catch (error) {
+    console.error("Erro ao salvar tentativa:", error);
+    return reply.status(500).send({ message: "Erro ao salvar resultado." });
+  }
+});
 // ===================================================================
 // ROTA DO QUIZ
 // ===================================================================
