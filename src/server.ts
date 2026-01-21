@@ -38,8 +38,8 @@ const createMaterialSchema = z.object({
 const createModuleSchema = z.object({
   title: z.string().min(3, "O título deve ter pelo menos 3 caracteres"),
   description: z.string().optional(),
-  cover_url: z.string().url("A URL da imagem deve ser válida"), // Link da logo da certificação
-  difficulty_level: z.coerce.number().min(1).max(5).default(1) // Nível de 1 a 5
+  cover_url: z.string().url("A URL da imagem deve ser válida"),
+  difficulty_level: z.coerce.number().min(1).max(5).default(1) 
 });
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
@@ -48,7 +48,8 @@ app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
 app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  credentials: true
+  credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization"]
 });
 
 
