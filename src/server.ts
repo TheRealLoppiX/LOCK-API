@@ -22,8 +22,9 @@ const createQuestionSchema = z.object({
   topic: z.string(),
   difficulty: z.string(),
   question: z.string().min(5),
-  options: z.array(z.string()).length(4), // Exige exatamente 4 opções
-  correct_answer: z.string()
+  options: z.array(z.string()).length(4),
+  correct_answer: z.string(),
+  module_id: z.string().optional()
 });
 const createMaterialSchema = z.object({
   title: z.string().min(3),
@@ -34,7 +35,12 @@ const createMaterialSchema = z.object({
   pdf_url: z.string().url(),   // Tem que ser um link válido
   total_pages: z.coerce.number().optional(), // Converte string pra number se vier do form
 });
-
+const createModuleSchema = z.object({
+  title: z.string().min(3, "O título deve ter pelo menos 3 caracteres"),
+  description: z.string().optional(),
+  cover_url: z.string().url("A URL da imagem deve ser válida"), // Link da logo da certificação
+  difficulty_level: z.coerce.number().min(1).max(5).default(1) // Nível de 1 a 5
+});
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
@@ -242,7 +248,23 @@ app.post("/reset-password", async (request, reply) => {
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
+app.get('/modules', async (request, reply) => {
+  try {
+    // Busca todos os módulos ordenados por data
+    const { data: modules, error } = await supabase
+      .from('exam_modules')
+      .select('*')
+      .order('created_at', { ascending: false });
 
+    if (error) throw error;
+
+    return reply.send(modules);
+
+  } catch (error) {
+    console.error("Erro ao buscar módulos:", error);
+    return reply.status(500).send({ message: "Erro ao carregar simulados." });
+  }
+});
 // ===================================================================
 // ROTA DO QUIZ
 // ===================================================================
@@ -533,8 +555,9 @@ app.post('/admin/questions', async (request, reply) => {
         topic: body.topic,
         difficulty: body.difficulty,
         question: body.question,
-        options: body.options, // O Supabase converte array JS para JSONB automaticamente
-        correct_answer: body.correct_answer
+        options: body.options,
+        correct_answer: body.correct_answer,
+        module_id: body.module_id || null
       });
 
     if (error) throw error;
@@ -620,6 +643,41 @@ app.post('/admin/materials', async (request, reply) => {
     }
     console.error("Erro ao cadastrar material:", error);
     return reply.status(500).send({ message: "Erro interno ao salvar material." });
+  }
+});
+app.post('/admin/modules', async (request, reply) => {
+  try {
+    // A. Segurança: Verifica Token e se é Admin
+    await request.jwtVerify();
+    const user = request.user;
+
+    if (!user.is_admin) {
+      return reply.status(403).send({ message: "⛔ Acesso negado. Apenas administradores." });
+    }
+
+    // B. Validação dos dados recebidos
+    const body = createModuleSchema.parse(request.body);
+
+    // C. Inserção no Supabase (Tabela exam_modules)
+    const { error } = await supabase
+      .from('exam_modules')
+      .insert({
+        title: body.title,
+        description: body.description,
+        cover_url: body.cover_url,
+        difficulty_level: body.difficulty_level
+      });
+
+    if (error) throw error;
+
+    return reply.status(201).send({ message: "🏆 Módulo de Simulado criado com sucesso!" });
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: "Dados inválidos.", issues: error.format() });
+    }
+    console.error("Erro ao criar módulo:", error);
+    return reply.status(500).send({ message: "Erro interno ao salvar módulo." });
   }
 });
 // --- XSS ---
