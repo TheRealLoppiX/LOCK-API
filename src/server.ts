@@ -532,32 +532,29 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
 
 app.post('/admin/questions', async (request, reply) => {
   try {
-    // 1. Verifica quem está chamando
     await request.jwtVerify();
     const user = request.user;
 
-    // 2. Verifica se é Admin (Segurança Crucial)
     if (!user.is_admin) {
-      return reply.status(403).send({ message: "Acesso negado. Apenas administradores." });
+      return reply.status(403).send({ message: "Acesso negado." });
     }
 
-    // 3. Valida os dados enviados
     const body = createQuestionSchema.parse(request.body);
 
-    // 4. Valida se a resposta correta está dentro das opções (evita erro humano)
-    if (!body.options.includes(body.correct_answer)) {
-      return reply.status(400).send({ message: "A resposta correta deve ser uma das opções fornecidas." });
+    const correctIndex = body.options.indexOf(body.correct_answer);
+
+    if (correctIndex === -1) {
+      return reply.status(400).send({ message: "A resposta correta não foi encontrada entre as opções." });
     }
 
-    // 5. Insere no banco
     const { error } = await supabase
       .from('questions')
       .insert({
         topic: body.topic,
         difficulty: body.difficulty,
-        question_text: body.question,
+        question_text: body.question, 
         options: body.options,
-        correct_answer_index: body.correct_answer,
+        correct_answer_index: correctIndex, 
         module_id: body.module_id || null
       });
 
@@ -566,11 +563,8 @@ app.post('/admin/questions', async (request, reply) => {
     return reply.status(201).send({ message: "Questão cadastrada com sucesso!" });
 
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return reply.status(400).send({ message: "Dados inválidos.", issues: error.format() });
-    }
-    console.error("Erro ao cadastrar questão:", error);
-    return reply.status(500).send({ message: "Erro interno ao salvar questão." });
+    console.error("Erro ao cadastrar:", error);
+    return reply.status(500).send({ message: "Erro ao salvar questão." });
   }
 });
 
