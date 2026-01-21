@@ -555,9 +555,9 @@ app.post('/admin/questions', async (request, reply) => {
       .insert({
         topic: body.topic,
         difficulty: body.difficulty,
-        question: body.question,
+        question_text: body.question,
         options: body.options,
-        correct_answer: body.correct_answer,
+        correct_answer_index: body.correct_answer,
         module_id: body.module_id || null
       });
 
