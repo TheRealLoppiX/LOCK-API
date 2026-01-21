@@ -280,12 +280,9 @@ app.get('/modules/:id/questions', async (request, reply) => {
 
     if (moduleError) return reply.status(404).send({ message: "Simulado não encontrado." });
 
-    // 2. Busca as questões vinculadas a esse módulo
-    // ATENÇÃO: Verifique se sua tabela chama 'questions' ou 'quiz_questions'
     const { data: questions, error: qError } = await supabase
       .from('questions') 
-      // Selecionamos o ÍNDICE da resposta correta (ajuste conforme seu banco)
-      .select('id, question, options, correct_answer_index') 
+      .select('id, question_text, options, correct_answer_index') 
       .eq('module_id', id);
 
     if (qError) throw qError;
