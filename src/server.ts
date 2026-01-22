@@ -307,7 +307,7 @@ app.get('/modules/:id/questions', async (request, reply) => {
     // 3. BUSCA AS QUESTÕES
     const { data: questions, error: qError } = await supabase
       .from('questions') 
-      .select('id, question, options, correct_answer_index') 
+      .select('id, question_text, options, correct_answer_index') 
       .eq('module_id', id);
 
     if (qError) throw qError;
