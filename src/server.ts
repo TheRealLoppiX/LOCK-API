@@ -30,16 +30,17 @@ const createMaterialSchema = z.object({
   title: z.string().min(3),
   author: z.string().min(2),
   synopsis: z.string().optional(),
-  type: z.enum(['Livro', 'Artigo', 'PDF', 'Apostila']), // Tipos permitidos
-  cover_url: z.string().url(), // Tem que ser um link válido
-  pdf_url: z.string().url(),   // Tem que ser um link válido
-  total_pages: z.coerce.number().optional(), // Converte string pra number se vier do form
+  type: z.enum(['Livro', 'Artigo', 'PDF', 'Apostila']), 
+  cover_url: z.string().url(), 
+  pdf_url: z.string().url(),   
+  total_pages: z.coerce.number().optional(), 
 });
 const createModuleSchema = z.object({
-  title: z.string().min(3, "O título deve ter pelo menos 3 caracteres"),
+  title: z.string().min(3),
   description: z.string().optional(),
-  cover_url: z.string().url("A URL da imagem deve ser válida"),
-  difficulty_level: z.coerce.number().min(1).max(5).default(1) 
+  cover_url: z.string().url(),
+  difficulty_level: z.coerce.number().min(1).max(5),
+  duration_minutes: z.coerce.number().min(5).default(60)
 });
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
@@ -268,21 +269,45 @@ app.get('/modules', async (request, reply) => {
 });
 app.get('/modules/:id/questions', async (request, reply) => {
   try {
-    // Valida o ID da URL
+    // Verifica Token (Necessário para saber QUEM é o usuário para bloquear)
+    await request.jwtVerify();
+    const user = request.user;
     const { id } = z.object({ id: z.string() }).parse(request.params);
 
-    // 1. Busca dados do módulo (Título, Dificuldade, etc)
+    // ============================================================
+    // 1. VERIFICAÇÃO DE "UMA VEZ POR DIA"
+    // ============================================================
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Zera o horário para pegar o início do dia
+
+    const { data: attempts, error: attemptError } = await supabase
+      .from('user_exam_attempts')
+      .select('id')
+      .eq('user_id', user.sub)
+      .eq('module_id', id)
+      .gte('created_at', today.toISOString()); // Busca tentativas de hoje em diante
+
+    if (attempts && attempts.length > 0) {
+      return reply.status(429).send({ 
+        message: "⛔ Você já realizou este simulado hoje. Tente novamente amanhã ou escolha outro módulo." 
+      });
+    }
+
+    // ============================================================
+    // 2. BUSCA DADOS DO MÓDULO (Incluindo duração)
+    // ============================================================
     const { data: moduleData, error: moduleError } = await supabase
       .from('exam_modules')
-      .select('*')
+      .select('*') // Vai trazer o duration_minutes
       .eq('id', id)
       .single();
 
     if (moduleError) return reply.status(404).send({ message: "Simulado não encontrado." });
 
+    // 3. BUSCA AS QUESTÕES
     const { data: questions, error: qError } = await supabase
       .from('questions') 
-      .select('id, question_text, options, correct_answer_index') 
+      .select('id, question, options, correct_answer_index') 
       .eq('module_id', id);
 
     if (qError) throw qError;
@@ -291,7 +316,7 @@ app.get('/modules/:id/questions', async (request, reply) => {
 
   } catch (error) {
     console.error("Erro ao buscar prova:", error);
-    return reply.status(500).send({ message: "Erro interno ao carregar simulado." });
+    return reply.status(500).send({ message: "Erro interno." });
   }
 });
 
@@ -720,7 +745,8 @@ app.post('/admin/modules', async (request, reply) => {
         title: body.title,
         description: body.description,
         cover_url: body.cover_url,
-        difficulty_level: body.difficulty_level
+        difficulty_level: body.difficulty_level,
+        duration_minutes: body.duration_minutes
       });
 
     if (error) throw error;
