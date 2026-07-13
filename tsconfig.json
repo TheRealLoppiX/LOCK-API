@@ -1,31 +1,23 @@
 {
   "compilerOptions": {
-    // Configurações Base do Projeto
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "node",
+    "ignoreDeprecations": "6.0",
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-
-    // Regras de Qualidade e Segurança de Código
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-
-    // A CORREÇÃO PRINCIPAL: Ensina o TypeScript a encontrar os nossos tipos personalizados
     "typeRoots": [
       "./node_modules/@types", 
       "./src/types"
     ],
-    
-    // Diz ao TypeScript para não gerar ficheiros .js, pois o 'tsup' faz isso
     "noEmit": true
   },
-  // Diz ao TypeScript para incluir todos os ficheiros dentro da pasta 'src'
   "include": ["src"],
 
-  // Configuração para a ferramenta 'tsx' que você usa em desenvolvimento
   "ts-node": {
     "esm": true
   }

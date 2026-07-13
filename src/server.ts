@@ -7,6 +7,7 @@ import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { Resend } from 'resend';
 import { z } from 'zod';
+import { aiService } from './services/AiService.js';
 
 const app = fastify();
 
@@ -122,14 +123,12 @@ app.post('/register', async (request, reply) => {
 
 /** @route POST /login */
 app.post("/login", async (request, reply) => {
-    console.log("📥 Tentativa de login recebida:", request.body); // LOG 1
-
     try {
         const { identifier, password } = loginSchema.parse(request.body);
         const { data: user, error } = await supabase
             .from("users")
             .select("*")
-            .or(`email.eq."${identifier}",name.eq."${identifier}"`) 
+            .or(`email.eq.${identifier},name.eq.${identifier}`)
             .maybeSingle();
 
         if (error) {
@@ -139,7 +138,7 @@ app.post("/login", async (request, reply) => {
 
         if (!user) {
             console.log("⚠️ Usuário não encontrado:", identifier);
-            return reply.status(401).send({ message: "Credenciais inválidas (Usuário não existe)" });
+            return reply.status(401).send({ message: "Credenciais inválidas" });
         }
 
         // Verifica se a senha existe no banco (para usuários criados via OAuth/Google que não têm senha)
@@ -151,7 +150,7 @@ app.post("/login", async (request, reply) => {
         
         if (!passwordMatch) {
             console.log("⚠️ Senha incorreta para:", identifier);
-            return reply.status(401).send({ message: "Credenciais inválidas (Senha incorreta)" });
+            return reply.status(401).send({ message: "Credenciais inválidas" });
         }
 
         // Gera token
@@ -653,40 +652,6 @@ app.post('/admin/questions', async (request, reply) => {
   }
 });
 
-// ===================================================================
-// ROTA DE CRIAÇÃO DO SUPER ADMIN
-// ===================================================================
-{/* app.get('/create-super-admin', async (request, reply) => {
-    const adminLogin = "";
-    const adminPass = "";
-
-    try {
-        // Verifica se já existe
-        const { data: exists } = await supabase.from("users").select("id").eq("name", adminLogin).single();
-        if (exists) return reply.send({ message: "Admin já existe!" });
-
-        // Criptografa a senha
-        const hashedPassword = await bcrypt.hash(adminPass, 10);
-
-        // Insere no banco forçando is_admin = true e email = null
-        const { error } = await supabase.from("users").insert({
-            name: adminLogin,
-            email: null, // Como você pediu
-            password: hashedPassword,
-            is_admin: true, // A flag mágica
-            avatar_url: "https://api.dicebear.com/8.x/bottts/svg?seed=ADMINLOCK"
-        });
-
-        if (error) throw error;
-
-        return reply.send({ message: "👑 Super Admin criado com sucesso!" });
-      } catch (error) {
-        console.error("ERRO DETALHADO:", error); // Mostra no terminal
-        // Mostra na tela do navegador também:
-        return reply.status(500).send({ error: "Erro ao criar admin", details: error });
-   }
-});
-*/}
 app.post('/admin/materials', async (request, reply) => {
   try {
     // 1. Segurança: Verifica Token e se é Admin
@@ -786,6 +751,54 @@ app.post('/labs/xss/3', async (request, reply) => { // Nível 3 - Salvar coment�
 });
 app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar comentários filtrados
   return reply.send(xssCommentsDbFiltered);
+});
+
+// ===================================================================
+// ROTAS DA IA (AEGIS)
+// ===================================================================
+
+/**
+ * @route POST /ai/chat
+ * @description Envia uma mensagem para a Aegis e recebe a resposta.
+ */
+app.post('/ai/chat', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    const { message } = z.object({
+      message: z.string().min(1).max(2000)
+    }).parse(request.body);
+
+    const response = await aiService.askAegis(message);
+    return reply.send({ response });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Mensagem inválida.' });
+    }
+    console.error('Erro na rota /ai/chat:', error);
+    return reply.status(500).send({ message: 'Erro ao processar com IA.' });
+  }
+});
+
+/**
+ * @route POST /ai/analyze-quiz
+ * @description Recebe questões que o usuário errou e retorna análise da Aegis.
+ */
+app.post('/ai/analyze-quiz', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    const { wrongQuestions } = z.object({
+      wrongQuestions: z.array(z.string().min(1)).min(1).max(20)
+    }).parse(request.body);
+
+    const analysis = await aiService.analisarErros(wrongQuestions);
+    return reply.send({ analysis });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error('Erro na rota /ai/analyze-quiz:', error);
+    return reply.status(500).send({ message: 'Erro ao analisar resultados.' });
+  }
 });
 
 // ===================================================================
