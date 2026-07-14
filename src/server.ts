@@ -304,9 +304,12 @@ app.get('/modules/:id/questions', async (request, reply) => {
     if (moduleError) return reply.status(404).send({ message: "Simulado não encontrado." });
 
     // 3. BUSCA AS QUESTÕES
+    // NOTA: correct_answer_index NÃO é selecionado aqui de propósito — a
+    // correção é feita no servidor, em POST /modules/:id/attempt, para que
+    // o gabarito nunca seja enviado ao cliente antes da correção.
     const { data: questions, error: qError } = await supabase
-      .from('questions') 
-      .select('id, question_text, options, correct_answer_index') 
+      .from('questions')
+      .select('id, question_text, options')
       .eq('module_id', id);
 
     if (qError) throw qError;
@@ -325,27 +328,47 @@ app.get('/modules/:id/questions', async (request, reply) => {
 app.post('/modules/:id/attempt', async (request, reply) => {
   try {
     await request.jwtVerify(); // Exige login
-    
+
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const body = z.object({
-      score: z.number(),
-      total_questions: z.number()
+    const { answers } = z.object({
+      answers: z.record(z.string(), z.string())
     }).parse(request.body);
+
+    // A nota é sempre calculada no servidor a partir do gabarito real —
+    // nunca confiamos numa nota calculada pelo cliente.
+    const { data: questions, error: qError } = await supabase
+      .from('questions')
+      .select('id, options, correct_answer_index')
+      .eq('module_id', id);
+
+    if (qError) throw qError;
+    if (!questions || questions.length === 0) {
+      return reply.status(404).send({ message: "Simulado não encontrado." });
+    }
+
+    let score = 0;
+    for (const q of questions) {
+      const correctOptionText = q.options[q.correct_answer_index];
+      if (answers[q.id] === correctOptionText) score++;
+    }
 
     const { error } = await supabase
       .from('user_exam_attempts')
       .insert({
         user_id: request.user.sub,
         module_id: id,
-        score: body.score,
-        total_questions: body.total_questions
+        score,
+        total_questions: questions.length
       });
 
     if (error) throw error;
 
-    return reply.status(201).send({ message: "Resultado salvo!" });
+    return reply.status(201).send({ message: "Resultado salvo!", score, total_questions: questions.length });
 
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
     console.error("Erro ao salvar tentativa:", error);
     return reply.status(500).send({ message: "Erro ao salvar resultado." });
   }
