@@ -14,6 +14,21 @@ import { aiService } from './services/AiService.js';
 const app = fastify({ bodyLimit: 20 * 1024 * 1024 });
 
 // ===================================================================
+// SISTEMA DE XP — fonte única da fórmula, usada por /profile/stats e
+// /leaderboard para que o ranking e o perfil nunca fiquem inconsistentes.
+// ===================================================================
+const XP_WEIGHTS = {
+    book: 50,
+    lab: 100,
+    quiz: 30,
+    exam: 500,
+};
+
+function computeXp({ books, labs, quizzes, exams }: { books: number; labs: number; quizzes: number; exams: number }): number {
+    return books * XP_WEIGHTS.book + labs * XP_WEIGHTS.lab + quizzes * XP_WEIGHTS.quiz + exams * XP_WEIGHTS.exam;
+}
+
+// ===================================================================
 // ESQUEMAS DE VALIDAÇÃO (ZOD)
 // ===================================================================
 const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email(), password: z.string().min(6) });
@@ -548,10 +563,98 @@ app.get('/profile/stats', async (request, reply) => {
 
         if (examsError) throw examsError;
 
-        return reply.send({ readBooks: readBooks || [], examAttempts: examAttempts || [] });
+        const { data: labCompletions, error: labsError } = await supabase
+            .from('user_lab_completions')
+            .select('lab_key, completed_at')
+            .eq('user_id', userId);
+
+        if (labsError) throw labsError;
+
+        const { data: quizCompletions, error: quizzesError } = await supabase
+            .from('user_quiz_completions')
+            .select('topic, difficulty, score, total_questions, completed_at')
+            .eq('user_id', userId);
+
+        if (quizzesError) throw quizzesError;
+
+        const passedExamsCount = (examAttempts || []).filter((e) => e.score / e.total_questions >= 0.7).length;
+        // XP de quiz conta uma vez por combinação única de tópico+dificuldade,
+        // pra não incentivar ficar repetindo o mesmo quiz só por XP.
+        const uniqueQuizCombos = new Set((quizCompletions || []).map((q) => `${q.topic}::${q.difficulty}`));
+
+        const totalXp = computeXp({
+            books: (readBooks || []).length,
+            labs: (labCompletions || []).length,
+            quizzes: uniqueQuizCombos.size,
+            exams: passedExamsCount,
+        });
+
+        return reply.send({
+            readBooks: readBooks || [],
+            examAttempts: examAttempts || [],
+            labCompletions: labCompletions || [],
+            quizCompletions: quizCompletions || [],
+            totalXp,
+        });
     } catch (error) {
         console.error('Erro ao buscar estatísticas de perfil:', error);
         return reply.status(500).send({ message: 'Erro ao buscar estatísticas de perfil.' });
+    }
+});
+
+/**
+ * @route POST /labs/complete
+ * @description Registra a conclusão de um laboratório para fins de XP.
+ * Idempotente — completar o mesmo lab de novo não duplica XP.
+ */
+app.post('/labs/complete', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { labKey } = z.object({ labKey: z.string().min(1).max(100) }).parse(request.body);
+
+        const { error } = await supabase
+            .from('user_lab_completions')
+            .upsert({ user_id: userId, lab_key: labKey }, { onConflict: 'user_id, lab_key' });
+
+        if (error) throw error;
+        return reply.status(200).send({ message: 'Laboratório registrado.' });
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'Dados inválidos.' });
+        console.error('Erro ao registrar laboratório:', error);
+        return reply.status(500).send({ message: 'Erro ao registrar laboratório.' });
+    }
+});
+
+/**
+ * @route POST /quiz/complete
+ * @description Registra a conclusão de um quiz de prática para fins de XP.
+ */
+app.post('/quiz/complete', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { topic, difficulty, score, totalQuestions } = z.object({
+            topic: z.string().min(1).max(50),
+            difficulty: z.string().min(1).max(20),
+            score: z.number().int().nonnegative(),
+            totalQuestions: z.number().int().positive(),
+        }).parse(request.body);
+
+        const { error } = await supabase.from('user_quiz_completions').insert({
+            user_id: userId,
+            topic,
+            difficulty,
+            score,
+            total_questions: totalQuestions,
+        });
+
+        if (error) throw error;
+        return reply.status(201).send({ message: 'Quiz registrado.' });
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'Dados inválidos.' });
+        console.error('Erro ao registrar quiz:', error);
+        return reply.status(500).send({ message: 'Erro ao registrar quiz.' });
     }
 });
 
@@ -675,6 +778,76 @@ app.post('/books/:id/reviews', async (request, reply) => {
         if (error instanceof z.ZodError) return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
         console.error('Erro ao enviar avaliação:', error);
         return reply.status(500).send({ message: 'Erro ao enviar avaliação.' });
+    }
+});
+
+/**
+ * @route GET /leaderboard
+ * @description Ranking global de usuários por XP. Retorna o top 20 e,
+ * se o usuário logado não estiver nele, a posição dele também.
+ */
+app.get('/leaderboard', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const currentUserId = request.user.sub;
+
+        const [usersRes, booksRes, examsRes, labsRes, quizzesRes] = await Promise.all([
+            supabase.from('users').select('id, name, avatar_url'),
+            supabase.from('user_library').select('user_id').eq('status', 'Lido'),
+            supabase.from('user_exam_attempts').select('user_id, score, total_questions'),
+            supabase.from('user_lab_completions').select('user_id'),
+            supabase.from('user_quiz_completions').select('user_id, topic, difficulty'),
+        ]);
+
+        for (const res of [usersRes, booksRes, examsRes, labsRes, quizzesRes]) {
+            if (res.error) throw res.error;
+        }
+
+        const countBy = (rows: { user_id: string }[] | null): Map<string, number> => {
+            const map = new Map<string, number>();
+            for (const row of rows || []) map.set(row.user_id, (map.get(row.user_id) || 0) + 1);
+            return map;
+        };
+
+        const bookCounts = countBy(booksRes.data);
+        const labCounts = countBy(labsRes.data);
+
+        const examPassedByUser = new Map<string, number>();
+        for (const attempt of examsRes.data || []) {
+            if (attempt.total_questions > 0 && attempt.score / attempt.total_questions >= 0.7) {
+                examPassedByUser.set(attempt.user_id, (examPassedByUser.get(attempt.user_id) || 0) + 1);
+            }
+        }
+
+        const quizComboByUser = new Map<string, Set<string>>();
+        for (const q of quizzesRes.data || []) {
+            const set = quizComboByUser.get(q.user_id) || new Set<string>();
+            set.add(`${q.topic}::${q.difficulty}`);
+            quizComboByUser.set(q.user_id, set);
+        }
+
+        const ranked = (usersRes.data || [])
+            .map((u) => ({
+                id: u.id,
+                name: u.name,
+                avatar_url: u.avatar_url,
+                totalXp: computeXp({
+                    books: bookCounts.get(u.id) || 0,
+                    labs: labCounts.get(u.id) || 0,
+                    quizzes: quizComboByUser.get(u.id)?.size || 0,
+                    exams: examPassedByUser.get(u.id) || 0,
+                }),
+            }))
+            .sort((a, b) => b.totalXp - a.totalXp)
+            .map((u, i) => ({ ...u, position: i + 1 }));
+
+        const top = ranked.slice(0, 20);
+        const currentUserEntry = ranked.find((u) => u.id === currentUserId) || null;
+
+        return reply.send({ leaderboard: top, currentUser: currentUserEntry });
+    } catch (error) {
+        console.error('Erro ao montar leaderboard:', error);
+        return reply.status(500).send({ message: 'Erro ao montar o ranking.' });
     }
 });
 
