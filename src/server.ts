@@ -46,7 +46,10 @@ const createModuleSchema = z.object({
 // ===================================================================
 // CONFIGURAÇÃO DOS PLUGINS
 // ===================================================================
-app.register(jwt, { secret: process.env.SUPABASE_JWT_SECRET! });
+// Segredo dedicado só para os tokens da própria aplicação — não é o JWT
+// secret do projeto Supabase (a app não usa Supabase Auth, então reusar
+// aquele segredo não tinha propósito e ampliava o raio de um vazamento).
+app.register(jwt, { secret: process.env.APP_JWT_SECRET! });
 app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -516,6 +519,163 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
         return reply.status(500).send({ error: 'Erro ao salvar último material acessado' });
     }
 });
+
+/**
+ * @route GET /profile/stats
+ * @description Livros lidos e tentativas de simulado do usuário logado.
+ * Substitui as consultas que o frontend fazia direto no Supabase com a
+ * chave anônima (agora bloqueada por RLS em todas as tabelas).
+ */
+app.get('/profile/stats', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+
+        const { data: readBooks, error: booksError } = await supabase
+            .from('user_library')
+            .select('book_id, book:books(title, cover_url)')
+            .eq('user_id', userId)
+            .eq('status', 'Lido');
+
+        if (booksError) throw booksError;
+
+        const { data: examAttempts, error: examsError } = await supabase
+            .from('user_exam_attempts')
+            .select('id, score, total_questions, completed_at, module:exam_modules(title, cover_url)')
+            .eq('user_id', userId);
+
+        if (examsError) throw examsError;
+
+        return reply.send({ readBooks: readBooks || [], examAttempts: examAttempts || [] });
+    } catch (error) {
+        console.error('Erro ao buscar estatísticas de perfil:', error);
+        return reply.status(500).send({ message: 'Erro ao buscar estatísticas de perfil.' });
+    }
+});
+
+// =====================================================================
+// ROTAS DE LIVROS (detalhe, progresso de leitura e avaliações)
+// =====================================================================
+
+app.get('/books/:id', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+        const { data: book, error } = await supabase
+            .from('books')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (error) return reply.status(404).send({ message: 'Material não encontrado.' });
+        return reply.send(book);
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'ID inválido.' });
+        console.error('Erro ao buscar material:', error);
+        return reply.status(500).send({ message: 'Erro ao buscar material.' });
+    }
+});
+
+app.get('/books/:id/progress', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+        const { data: progress, error } = await supabase
+            .from('reading_progress')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('book_id', id)
+            .maybeSingle();
+
+        if (error) throw error;
+        return reply.send(progress || { current_page: 1, is_completed: false });
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'ID inválido.' });
+        console.error('Erro ao buscar progresso de leitura:', error);
+        return reply.status(500).send({ message: 'Erro ao buscar progresso de leitura.' });
+    }
+});
+
+const updateProgressSchema = z.object({
+    current_page: z.number().int().nonnegative(),
+    is_completed: z.boolean(),
+});
+
+app.put('/books/:id/progress', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+        const { current_page, is_completed } = updateProgressSchema.parse(request.body);
+
+        const { error } = await supabase.from('reading_progress').upsert({
+            user_id: userId,
+            book_id: id,
+            current_page,
+            is_completed,
+            last_read_at: new Date().toISOString(),
+        }, { onConflict: 'user_id, book_id' });
+
+        if (error) throw error;
+        return reply.status(200).send({ message: 'Progresso salvo.' });
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        console.error('Erro ao salvar progresso de leitura:', error);
+        return reply.status(500).send({ message: 'Erro ao salvar progresso de leitura.' });
+    }
+});
+
+app.get('/books/:id/reviews', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+        const { data: reviews, error } = await supabase
+            .from('book_reviews')
+            .select('*, users(name, avatar_url)')
+            .eq('book_id', id)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        return reply.send(reviews || []);
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'ID inválido.' });
+        console.error('Erro ao buscar avaliações:', error);
+        return reply.status(500).send({ message: 'Erro ao buscar avaliações.' });
+    }
+});
+
+const createReviewSchema = z.object({
+    rating: z.number().int().min(1).max(5),
+    comment: z.string().max(2000).optional().default(''),
+});
+
+app.post('/books/:id/reviews', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+        const { rating, comment } = createReviewSchema.parse(request.body);
+
+        const { error } = await supabase.from('book_reviews').insert({
+            user_id: userId,
+            book_id: id,
+            rating,
+            comment,
+        });
+
+        if (error) throw error;
+        return reply.status(201).send({ message: 'Avaliação enviada!' });
+    } catch (error) {
+        if (error instanceof z.ZodError) return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        console.error('Erro ao enviar avaliação:', error);
+        return reply.status(500).send({ message: 'Erro ao enviar avaliação.' });
+    }
+});
+
 // =====================================================================
 // ROTAS DOS LABORATÓRIOS
 // =====================================================================
