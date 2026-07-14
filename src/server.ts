@@ -9,7 +9,9 @@ import { Resend } from 'resend';
 import { z } from 'zod';
 import { aiService } from './services/AiService.js';
 
-const app = fastify();
+// bodyLimit maior que o padrão (1MB) para caber anexos de imagem/documento
+// em base64 no chat da Aegis — o limite por arquivo é reforçado abaixo.
+const app = fastify({ bodyLimit: 20 * 1024 * 1024 });
 
 // ===================================================================
 // ESQUEMAS DE VALIDAÇÃO (ZOD)
@@ -797,6 +799,34 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
   }
 });
 
+/**
+ * @route POST /admin/questions/generate
+ * @description Gera rascunhos de questões com a Aegis para o admin revisar
+ * e cadastrar manualmente via POST /admin/questions — nada é salvo aqui.
+ */
+app.post('/admin/questions/generate', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { tema, quantidade } = z.object({
+      tema: z.string().min(2).max(100),
+      quantidade: z.coerce.number().int().min(1).max(10),
+    }).parse(request.body);
+
+    const questoes = await aiService.gerarQuestoesIA(tema, quantidade);
+    return reply.send({ questoes });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error("Erro ao gerar questões com IA:", error);
+    return reply.status(500).send({ message: "Erro ao gerar questões com IA." });
+  }
+});
+
 app.post('/admin/questions', async (request, reply) => {
   try {
     await request.jwtVerify();
@@ -944,18 +974,34 @@ app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar
  * @route POST /ai/chat
  * @description Envia uma mensagem para a Aegis e recebe a resposta.
  */
+const ALLOWED_ATTACHMENT_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf', 'text/plain'];
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5MB por arquivo, antes do base64
+
+const attachmentSchema = z.object({
+  name: z.string().min(1).max(200),
+  mimeType: z.enum(ALLOWED_ATTACHMENT_TYPES as [string, ...string[]]),
+  data: z.string().min(1),
+}).refine((att) => Buffer.byteLength(att.data, 'base64') <= MAX_ATTACHMENT_BYTES, {
+  message: 'Arquivo maior que o limite de 5MB.',
+});
+
+const chatSchema = z.object({
+  message: z.string().max(2000).default(''),
+  attachments: z.array(attachmentSchema).max(3).optional(),
+}).refine((body) => body.message.trim().length > 0 || (body.attachments && body.attachments.length > 0), {
+  message: 'Envie uma mensagem ou pelo menos um anexo.',
+});
+
 app.post('/ai/chat', async (request, reply) => {
   try {
     await request.jwtVerify();
-    const { message } = z.object({
-      message: z.string().min(1).max(2000)
-    }).parse(request.body);
+    const { message, attachments } = chatSchema.parse(request.body);
 
-    const response = await aiService.askAegis(message);
+    const response = await aiService.askAegis(message, 800, attachments);
     return reply.send({ response });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return reply.status(400).send({ message: 'Mensagem inválida.' });
+      return reply.status(400).send({ message: 'Mensagem inválida.', issues: error.format() });
     }
     console.error('Erro na rota /ai/chat:', error);
     return reply.status(500).send({ message: 'Erro ao processar com IA.' });
