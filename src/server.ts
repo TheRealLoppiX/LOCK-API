@@ -1000,6 +1000,49 @@ app.post('/admin/questions/generate', async (request, reply) => {
   }
 });
 
+app.get('/admin/questions', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { data, error } = await supabase
+      .from('questions')
+      .select('id, question_text, topic, difficulty, module_id')
+      .order('id', { ascending: false });
+
+    if (error) throw error;
+
+    return reply.send(data);
+  } catch (error) {
+    console.error("Erro ao listar questões:", error);
+    return reply.status(500).send({ message: "Erro ao carregar questões." });
+  }
+});
+
+app.delete('/admin/questions/:id', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const { error } = await supabase.from('questions').delete().eq('id', id);
+    if (error) throw error;
+
+    return reply.status(200).send({ message: "Questão excluída." });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error("Erro ao excluir questão:", error);
+    return reply.status(500).send({ message: "Erro ao excluir questão." });
+  }
+});
+
 app.post('/admin/questions', async (request, reply) => {
   try {
     await request.jwtVerify();
@@ -1035,6 +1078,49 @@ app.post('/admin/questions', async (request, reply) => {
   } catch (error) {
     console.error("Erro ao cadastrar:", error);
     return reply.status(500).send({ message: "Erro ao salvar questão." });
+  }
+});
+
+app.get('/admin/materials', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { data, error } = await supabase
+      .from('books')
+      .select('id, title, author, type')
+      .order('id', { ascending: false });
+
+    if (error) throw error;
+
+    return reply.send(data);
+  } catch (error) {
+    console.error("Erro ao listar materiais:", error);
+    return reply.status(500).send({ message: "Erro ao carregar materiais." });
+  }
+});
+
+app.delete('/admin/materials/:id', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const { error } = await supabase.from('books').delete().eq('id', id);
+    if (error) throw error;
+
+    return reply.status(200).send({ message: "Material excluído." });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error("Erro ao excluir material:", error);
+    return reply.status(500).send({ message: "Erro ao excluir material." });
   }
 });
 
@@ -1076,6 +1162,28 @@ app.post('/admin/materials', async (request, reply) => {
     return reply.status(500).send({ message: "Erro interno ao salvar material." });
   }
 });
+app.delete('/admin/modules/:id', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "Acesso negado." });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const { error } = await supabase.from('exam_modules').delete().eq('id', id);
+    if (error) throw error;
+
+    return reply.status(200).send({ message: "Simulado excluído." });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error("Erro ao excluir módulo:", error);
+    return reply.status(500).send({ message: "Erro ao excluir simulado. Verifique se não há questões vinculadas a ele." });
+  }
+});
+
 app.post('/admin/modules', async (request, reply) => {
   try {
     // A. Segurança: Verifica Token e se é Admin
