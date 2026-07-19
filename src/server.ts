@@ -36,6 +36,11 @@ const loginSchema = z.object({ identifier: z.string().min(3), password: z.string
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const resetPasswordSchema = z.object({ token: z.string().min(1), password: z.string().min(6) });
 const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
+const AVATAR_MIME_TO_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg' };
+const avatarUploadSchema = z.object({
+  data: z.string().min(1, 'Nenhuma imagem enviada.'),
+  mimeType: z.enum(['image/png', 'image/jpeg'], { errorMap: () => ({ message: 'Use uma imagem PNG ou JPEG.' }) }),
+});
 const createQuestionSchema = z.object({
   topic: z.string(),
   difficulty: z.string(),
@@ -215,6 +220,96 @@ app.put('/profile/update', async (request, reply) => {
         if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error('Erro ao atualizar perfil:', error);
         return reply.status(500).send({ message: 'Erro interno ao atualizar perfil.' });
+    }
+});
+
+const AVATAR_BUCKET = 'avatars';
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+// Assinatura dos primeiros bytes de cada formato — confere que o conteúdo
+// real do arquivo bate com o mimeType declarado pelo cliente, em vez de
+// confiar cegamente nele.
+const FILE_SIGNATURES: Record<string, number[]> = {
+    'image/png': [0x89, 0x50, 0x4e, 0x47],
+    'image/jpeg': [0xff, 0xd8, 0xff],
+};
+
+function matchesSignature(buffer: Buffer, mimeType: string): boolean {
+    const signature = FILE_SIGNATURES[mimeType];
+    if (!signature) return false;
+    return signature.every((byte, i) => buffer[i] === byte);
+}
+
+/**
+ * @route POST /profile/avatar
+ * @description Recebe uma foto de perfil (base64), varre em busca de
+ * conteúdo explícito via IA antes de aceitar, e substitui o avatar do
+ * usuário no Supabase Storage.
+ */
+app.post('/profile/avatar', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { data: base64, mimeType } = avatarUploadSchema.parse(request.body);
+
+        const buffer = Buffer.from(base64, 'base64');
+        if (buffer.length === 0) {
+            return reply.status(400).send({ message: 'Não foi possível ler a imagem enviada.' });
+        }
+        if (buffer.length > MAX_AVATAR_BYTES) {
+            return reply.status(400).send({ message: 'A imagem passa do limite de 5MB.' });
+        }
+        if (!matchesSignature(buffer, mimeType)) {
+            return reply.status(400).send({ message: 'O conteúdo do arquivo não corresponde a uma imagem PNG/JPEG válida.' });
+        }
+
+        // Sem uma segunda camada de defesa depois desta (diferente do chat da
+        // Aegis), uma falha na chamada de moderação rejeita o upload em vez
+        // de deixar passar — a foto fica visível publicamente no site.
+        let moderation;
+        try {
+            moderation = await aiService.moderateImage(base64, mimeType);
+        } catch (moderationError) {
+            console.error('Erro ao moderar imagem de perfil:', moderationError);
+            return reply.status(502).send({ message: 'Não foi possível verificar a imagem agora. Tente novamente em instantes.' });
+        }
+        if (moderation.explicit) {
+            return reply.status(422).send({ message: 'Esta imagem parece conter conteúdo impróprio e não pode ser usada como foto de perfil.' });
+        }
+
+        const ext = AVATAR_MIME_TO_EXT[mimeType];
+        const path = `${userId}.${ext}`;
+        // Limpa uma extensão antiga diferente (ex: trocou de .png pra .jpg)
+        // pra não acumular arquivo órfão — best effort, ignora se não existir.
+        const otherExt = ext === 'png' ? 'jpg' : 'png';
+        await supabase.storage.from(AVATAR_BUCKET).remove([`${userId}.${otherExt}`]).catch(() => {});
+
+        const { error: uploadError } = await supabase.storage
+            .from(AVATAR_BUCKET)
+            .upload(path, buffer, { contentType: mimeType, upsert: true });
+        if (uploadError) throw uploadError;
+
+        const { data: publicUrlData } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
+        // Query string de cache-busting: o caminho do arquivo é sempre o
+        // mesmo (um por usuário), então sem isso o navegador/CDN continuaria
+        // mostrando a imagem antiga depois de uma troca.
+        const avatarUrl = `${publicUrlData.publicUrl}?v=${Date.now()}`;
+
+        const { data: updatedUser, error: updateError } = await supabase
+            .from('users')
+            .update({ avatar_url: avatarUrl })
+            .eq('id', userId)
+            .select()
+            .single();
+        if (updateError) throw updateError;
+        delete updatedUser.password;
+
+        return reply.status(200).send({ user: updatedUser, avatar_url: avatarUrl });
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: error.issues[0]?.message || 'Dados inválidos.', issues: error.format() });
+        }
+        console.error('Erro ao atualizar foto de perfil:', error);
+        return reply.status(500).send({ message: 'Erro interno ao atualizar a foto de perfil.' });
     }
 });
 
@@ -1278,7 +1373,11 @@ app.post('/ai/chat', async (request, reply) => {
     await request.jwtVerify();
     const { message, attachments } = chatSchema.parse(request.body);
 
-    const response = await aiService.askAegis(message, 800, attachments);
+    // O modelo de visão (usado quando há imagem anexada) "pensa" antes de
+    // responder e essa etapa consome tokens da própria resposta — um budget
+    // maior evita que a resposta final saia cortada nesses casos.
+    const hasImageAttachment = (attachments || []).some((a) => a.mimeType.startsWith('image/'));
+    const response = await aiService.askAegis(message, hasImageAttachment ? 1400 : 800, attachments);
     return reply.send({ response });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -1314,10 +1413,27 @@ app.post('/ai/analyze-quiz', async (request, reply) => {
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
-app.listen({
-    host: "0.0.0.0",
-    port: process.env.PORT ? Number(process.env.PORT) : 3333,
-}).then(() => {
-    console.log("🚀 Servidor a rodar com CORS ativado em http://localhost:3333");
+async function ensureAvatarBucket() {
+    const { data: existing } = await supabase.storage.getBucket(AVATAR_BUCKET);
+    if (existing) return;
+    const { error } = await supabase.storage.createBucket(AVATAR_BUCKET, {
+        public: true,
+        fileSizeLimit: MAX_AVATAR_BYTES,
+        allowedMimeTypes: ['image/png', 'image/jpeg'],
+    });
+    if (error) {
+        console.error(`⚠️  Não foi possível criar/verificar o bucket "${AVATAR_BUCKET}" do Supabase Storage:`, error.message);
+    } else {
+        console.log(`📦 Bucket "${AVATAR_BUCKET}" criado no Supabase Storage.`);
+    }
+}
+
+ensureAvatarBucket().finally(() => {
+    app.listen({
+        host: "0.0.0.0",
+        port: process.env.PORT ? Number(process.env.PORT) : 3333,
+    }).then(() => {
+        console.log("🚀 Servidor a rodar com CORS ativado em http://localhost:3333");
+    });
 });
 
