@@ -36,6 +36,11 @@ const loginSchema = z.object({ identifier: z.string().min(3), password: z.string
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const resetPasswordSchema = z.object({ token: z.string().min(1), password: z.string().min(6) });
 const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(6),
+  newPassword: z.string().min(6),
+});
+const deleteAccountSchema = z.object({ password: z.string().min(6) });
 const AVATAR_MIME_TO_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg' };
 const avatarUploadSchema = z.object({
   data: z.string().min(1, 'Nenhuma imagem enviada.'),
@@ -314,6 +319,88 @@ app.post('/profile/avatar', async (request, reply) => {
 });
 
 /**
+ * @route PATCH /profile/password
+ * @description Altera a senha do usuário autenticado, exigindo a senha atual
+ * (diferente do fluxo de /forgot-password, que é para quem está deslogado).
+ */
+app.patch('/profile/password', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { currentPassword, newPassword } = changePasswordSchema.parse(request.body);
+
+        const { data: user, error } = await supabase.from('users').select('password').eq('id', userId).single();
+        if (error) throw error;
+        if (!user?.password) {
+            return reply.status(400).send({ message: 'Esta conta não possui senha configurada.' });
+        }
+
+        const passwordMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!passwordMatch) {
+            return reply.status(401).send({ message: 'Senha atual incorreta.' });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const { error: updateError } = await supabase.from('users').update({ password: hashedPassword }).eq('id', userId);
+        if (updateError) throw updateError;
+
+        return reply.status(200).send({ message: 'Senha alterada com sucesso.' });
+    } catch (error) {
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
+        console.error('Erro ao alterar senha:', error);
+        return reply.status(500).send({ message: 'Erro interno ao alterar senha.' });
+    }
+});
+
+/**
+ * @route DELETE /profile
+ * @description Exclui permanentemente a conta do usuário autenticado (exige
+ * confirmação de senha) e todos os dados dependentes (biblioteca, tentativas
+ * de simulado, conclusões de labs/quizzes, progresso de leitura, avaliações
+ * e avatar no Storage).
+ */
+app.delete('/profile', async (request, reply) => {
+    try {
+        await request.jwtVerify();
+        const userId = request.user.sub;
+        const { password } = deleteAccountSchema.parse(request.body);
+
+        const { data: user, error } = await supabase.from('users').select('password').eq('id', userId).single();
+        if (error) throw error;
+        if (!user?.password) {
+            return reply.status(400).send({ message: 'Esta conta não possui senha configurada.' });
+        }
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) {
+            return reply.status(401).send({ message: 'Senha incorreta.' });
+        }
+
+        // Limpa os dados dependentes antes do usuário em si — best effort em
+        // cada tabela para que uma falha isolada não impeça as demais de limpar.
+        const dependentTables = ['user_library', 'user_exam_attempts', 'user_lab_completions', 'user_quiz_completions', 'reading_progress', 'book_reviews'];
+        for (const table of dependentTables) {
+            const { error: depError } = await supabase.from(table).delete().eq('user_id', userId);
+            if (depError) console.error(`Erro ao limpar ${table} da conta ${userId}:`, depError);
+        }
+
+        await Promise.all(
+            (['png', 'jpg'] as const).map((ext) =>
+                supabase.storage.from(AVATAR_BUCKET).remove([`${userId}.${ext}`]).catch(() => {})
+            )
+        );
+
+        const { error: deleteError } = await supabase.from('users').delete().eq('id', userId);
+        if (deleteError) throw deleteError;
+
+        return reply.status(200).send({ message: 'Conta excluída com sucesso.' });
+    } catch (error) {
+        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
+        console.error('Erro ao excluir conta:', error);
+        return reply.status(500).send({ message: 'Erro interno ao excluir conta.' });
+    }
+});
+
+/**
  * @route POST /forgot-password
  * @description Inicia o fluxo de redefinição de palavra-passe.
  */
@@ -326,7 +413,7 @@ app.post("/forgot-password", async (request, reply) => {
             const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
             const expires = new Date(Date.now() + 3600000); // 1 hora
             await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
-            const resetUrl = `https://lock-front.onrender.com/reset-password/${resetToken}`;
+            const resetUrl = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/reset-password/${resetToken}`;
             const resend = new Resend(process.env.RESEND_API_KEY);
             await resend.emails.send({
                 from: 'LOCK Platform <onboarding@resend.dev>',
@@ -1257,6 +1344,58 @@ app.post('/admin/materials', async (request, reply) => {
     return reply.status(500).send({ message: "Erro interno ao salvar material." });
   }
 });
+
+const BOOKS_BUCKET = 'books';
+const rehostPdfSchema = z.object({ source_url: z.string().url() });
+
+/**
+ * @route POST /admin/materials/:id/rehost-pdf
+ * @description Baixa o PDF de uma URL externa e o re-hospeda no Supabase
+ * Storage, atualizando o pdf_url — corrige materiais cujo link externo não
+ * serve os bytes brutos do arquivo (ex: uma página HTML de visualização do
+ * Google Drive), que é o que o leitor (react-pdf/pdf.js) precisa.
+ */
+app.post('/admin/materials/:id/rehost-pdf', async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: "⛔ Acesso negado. Apenas administradores." });
+    }
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { source_url } = rehostPdfSchema.parse(request.body);
+
+    const download = await fetch(source_url);
+    if (!download.ok) {
+      return reply.status(502).send({ message: `Não foi possível baixar o arquivo de origem (status ${download.status}).` });
+    }
+    const contentType = download.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      return reply.status(422).send({ message: 'A URL de origem não retornou um arquivo direto (recebeu uma página HTML).' });
+    }
+    const buffer = Buffer.from(await download.arrayBuffer());
+
+    const path = `${id}.pdf`;
+    const { error: uploadError } = await supabase.storage
+      .from(BOOKS_BUCKET)
+      .upload(path, buffer, { contentType: 'application/pdf', upsert: true });
+    if (uploadError) throw uploadError;
+
+    const { data: publicUrlData } = supabase.storage.from(BOOKS_BUCKET).getPublicUrl(path);
+    const pdf_url = publicUrlData.publicUrl;
+
+    const { error: updateError } = await supabase.from('books').update({ pdf_url }).eq('id', id);
+    if (updateError) throw updateError;
+
+    return reply.status(200).send({ message: 'PDF re-hospedado com sucesso.', pdf_url });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro ao re-hospedar PDF:', error);
+    return reply.status(500).send({ message: 'Erro interno ao re-hospedar o PDF.' });
+  }
+});
+
 app.delete('/admin/modules/:id', async (request, reply) => {
   try {
     await request.jwtVerify();
@@ -1318,28 +1457,91 @@ app.post('/admin/modules', async (request, reply) => {
 // --- XSS ---
 // (XSS Nível 1 é Frontend-Puro, não precisa de rota)
 
-// Simulação de "banco de dados" de comentários para os labs de XSS
-const xssCommentsDb: { author: string, site: string, comment: string }[] = [];
-const xssCommentsDbFiltered: { author: string, site: string, comment: string }[] = [];
+// Simulação de "banco de dados" de comentários para os labs de XSS — escopado
+// por usuário (userId, vindo do JWT) para que o payload de teste de um aluno
+// não "polua" a tela de outro aluno usando o mesmo laboratório. Também exige
+// login em todas as rotas abaixo, o que antes não acontecia.
+const xssCommentSchema = z.object({
+  author: z.string().max(200).default(''),
+  site: z.string().max(2000).default(''),
+  comment: z.string().max(2000).default(''),
+});
+type XssComment = { userId: string, author: string, site: string, comment: string };
+const xssCommentsDb: XssComment[] = [];
+const xssCommentsDbFiltered: XssComment[] = [];
 
 app.post('/labs/xss/2', async (request, reply) => { // Nível 2 - Salvar comentário
-  const { author, site, comment } = request.body as any;
-  xssCommentsDb.push({ author, site, comment });
-  return reply.send({ success: true });
+  try {
+    await request.jwtVerify();
+    const { author, site, comment } = xssCommentSchema.parse(request.body);
+    xssCommentsDb.push({ userId: request.user.sub, author, site, comment });
+    return reply.send({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
+    console.error('Erro em /labs/xss/2:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
 });
-app.get('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Buscar comentários
-  return reply.send(xssCommentsDb);
+app.get('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Buscar comentários (só os do próprio usuário)
+  try {
+    await request.jwtVerify();
+    const userId = request.user.sub;
+    return reply.send(xssCommentsDb.filter((c) => c.userId === userId));
+  } catch (error) {
+    console.error('Erro em GET /labs/xss/2/comments:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
+});
+app.delete('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Resetar laboratório (limpa só os comentários do próprio usuário)
+  try {
+    await request.jwtVerify();
+    const userId = request.user.sub;
+    for (let i = xssCommentsDb.length - 1; i >= 0; i--) {
+      if (xssCommentsDb[i].userId === userId) xssCommentsDb.splice(i, 1);
+    }
+    return reply.send({ success: true });
+  } catch (error) {
+    console.error('Erro em DELETE /labs/xss/2/comments:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
 });
 
 app.post('/labs/xss/3', async (request, reply) => { // Nível 3 - Salvar comentário com filtro
-  let { author, site, comment } = request.body as any;
-  // Filtro ingênuo
-  site = site.replace(/alert/gi, "").replace(/<script>/gi, "");
-  xssCommentsDbFiltered.push({ author, site, comment });
-  return reply.send({ success: true });
+  try {
+    await request.jwtVerify();
+    let { author, site, comment } = xssCommentSchema.parse(request.body);
+    // Filtro ingênuo
+    site = site.replace(/alert/gi, "").replace(/<script>/gi, "");
+    xssCommentsDbFiltered.push({ userId: request.user.sub, author, site, comment });
+    return reply.send({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
+    console.error('Erro em /labs/xss/3:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
 });
-app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar comentários filtrados
-  return reply.send(xssCommentsDbFiltered);
+app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar comentários filtrados (só os do próprio usuário)
+  try {
+    await request.jwtVerify();
+    const userId = request.user.sub;
+    return reply.send(xssCommentsDbFiltered.filter((c) => c.userId === userId));
+  } catch (error) {
+    console.error('Erro em GET /labs/xss/3/comments:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
+});
+app.delete('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Resetar laboratório (limpa só os comentários do próprio usuário)
+  try {
+    await request.jwtVerify();
+    const userId = request.user.sub;
+    for (let i = xssCommentsDbFiltered.length - 1; i >= 0; i--) {
+      if (xssCommentsDbFiltered[i].userId === userId) xssCommentsDbFiltered.splice(i, 1);
+    }
+    return reply.send({ success: true });
+  } catch (error) {
+    console.error('Erro em DELETE /labs/xss/3/comments:', error);
+    return reply.status(500).send({ message: 'Erro interno.' });
+  }
 });
 
 // ===================================================================
@@ -1361,9 +1563,19 @@ const attachmentSchema = z.object({
   message: 'Arquivo maior que o limite de 5MB.',
 });
 
+// Histórico da conversa (o front manda as trocas anteriores da mesma
+// conversa — a Aegis não guarda nada disso no servidor, o histórico vive só
+// no localStorage do cliente). Limitado a 40 entradas no schema; o serviço
+// ainda corta pra uma janela menor antes de repassar à Groq (ver AiService).
+const chatHistorySchema = z.array(z.object({
+  role: z.enum(['user', 'aegis']),
+  content: z.string().max(4000),
+})).max(40).optional();
+
 const chatSchema = z.object({
   message: z.string().max(2000).default(''),
   attachments: z.array(attachmentSchema).max(3).optional(),
+  history: chatHistorySchema,
 }).refine((body) => body.message.trim().length > 0 || (body.attachments && body.attachments.length > 0), {
   message: 'Envie uma mensagem ou pelo menos um anexo.',
 });
@@ -1371,13 +1583,13 @@ const chatSchema = z.object({
 app.post('/ai/chat', async (request, reply) => {
   try {
     await request.jwtVerify();
-    const { message, attachments } = chatSchema.parse(request.body);
+    const { message, attachments, history } = chatSchema.parse(request.body);
 
     // O modelo de visão (usado quando há imagem anexada) "pensa" antes de
     // responder e essa etapa consome tokens da própria resposta — um budget
     // maior evita que a resposta final saia cortada nesses casos.
     const hasImageAttachment = (attachments || []).some((a) => a.mimeType.startsWith('image/'));
-    const response = await aiService.askAegis(message, hasImageAttachment ? 1400 : 800, attachments);
+    const response = await aiService.askAegis(message, hasImageAttachment ? 1400 : 800, attachments, history);
     return reply.send({ response });
   } catch (error) {
     if (error instanceof z.ZodError) {

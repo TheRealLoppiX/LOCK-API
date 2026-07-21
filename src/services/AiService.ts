@@ -14,6 +14,16 @@ export interface ChatAttachment {
   data: string; // base64, sem o prefixo "data:...;base64,"
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'aegis';
+  content: string;
+}
+
+// Quantas trocas anteriores (pares pergunta+resposta) entram no contexto
+// enviado à Groq. Aplicado aqui, não só no schema da rota, pra limitar o
+// custo/tokens mesmo que o histórico salvo no cliente cresça mais que isso.
+const MAX_HISTORY_MESSAGES = 12;
+
 const MAX_DOC_CHARS = 6000;
 
 async function extractDocumentText(attachment: ChatAttachment): Promise<string> {
@@ -176,7 +186,7 @@ const ATTACK_REFUSAL_REPLY = "Não posso ajudar a atacar um alvo real fora de um
 const LEAK_BLOCKED_REPLY = "Não posso compartilhar esse tipo de informação. Posso ajudar com outra dúvida sobre cibersegurança?";
 
 export const aiService = {
-  askAegis: async (prompt: string, maxTokens: number = 800, attachments: ChatAttachment[] = []) => {
+  askAegis: async (prompt: string, maxTokens: number = 800, attachments: ChatAttachment[] = [], history: ChatHistoryMessage[] = []) => {
     try {
       if (!GROQ_API_KEY) throw new Error("Chave Groq não configurada.");
 
@@ -212,7 +222,14 @@ export const aiService = {
             ]
           : effectivePrompt;
 
-      // Camada 2: geração com prompt reforçado
+      // Camada 2: geração com prompt reforçado — inclui as últimas trocas da
+      // mesma conversa (mapeando o "aegis" do front pro "assistant" que a API
+      // da Groq espera) para que a Aegis tenha memória do que já foi dito.
+      const historyMessages = history.slice(-MAX_HISTORY_MESSAGES).map((entry) => ({
+        role: entry.role === "aegis" ? "assistant" : "user",
+        content: entry.content,
+      }));
+
       const response = await fetch(API_URL, {
         method: "POST",
         headers: {
@@ -223,6 +240,7 @@ export const aiService = {
           model: images.length > 0 ? VISION_MODEL : MODEL,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
+            ...historyMessages,
             { role: "user", content: userContent },
           ],
           max_tokens: maxTokens,
