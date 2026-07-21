@@ -79,7 +79,7 @@ const createModuleSchema = z.object({
 app.register(jwt, { secret: process.env.APP_JWT_SECRET! });
 app.register(cors, {
   origin: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"]
 });
