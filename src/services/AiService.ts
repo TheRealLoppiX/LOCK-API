@@ -156,7 +156,7 @@ const LEAK_PATTERNS: RegExp[] = [
   /sbp_[a-f0-9]{20,}/i,                          // token de acesso do Supabase
   /eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/, // string com formato de JWT
   /gsk_[a-zA-Z0-9]{20,}/,                        // chave da Groq
-  /re_[a-zA-Z0-9_]{10,}/,                        // chave da Resend
+  /xkeysib-[a-zA-Z0-9]{60,}/,                    // chave da Brevo
   /SUPABASE_(URL|KEY|SERVICE_ROLE_KEY|JWT_SECRET)\b/i,
   /APP_JWT_SECRET/i,
   /process\.env\.\w+/,

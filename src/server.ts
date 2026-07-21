@@ -5,7 +5,6 @@ import jwt from '@fastify/jwt';
 import { supabase } from "./supabaseConnection.js";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { Resend } from 'resend';
 import { z } from 'zod';
 import { aiService } from './services/AiService.js';
 
@@ -414,13 +413,27 @@ app.post("/forgot-password", async (request, reply) => {
             const expires = new Date(Date.now() + 3600000); // 1 hora
             await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
             const resetUrl = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/reset-password/${resetToken}`;
-            const resend = new Resend(process.env.RESEND_API_KEY);
-            await resend.emails.send({
-                from: 'LOCK Platform <onboarding@resend.dev>',
-                to: email,
-                subject: 'O seu Link de Redefinição de Palavra-passe',
-                html: `<p>Clique aqui para redefinir: <a href="${resetUrl}">Redefinir Palavra-passe</a>.</p>`,
+
+            const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'api-key': process.env.BREVO_API_KEY!,
+                },
+                body: JSON.stringify({
+                    sender: { name: 'LOCK Platform', email: 'tutuzao2016@gmail.com' },
+                    to: [{ email }],
+                    subject: 'O seu Link de Redefinição de Palavra-passe',
+                    htmlContent: `<p>Clique aqui para redefinir a sua senha no LOCK:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Se você não pediu essa redefinição, ignore este e-mail.</p>`,
+                }),
             });
+            // Não propaga o erro pro cliente (a mensagem de resposta é sempre a
+            // mesma, exista ou não o e-mail — evita enumeração de usuários),
+            // mas registra pra dar pra diagnosticar problemas de envio.
+            if (!brevoRes.ok) {
+                console.error('Erro ao enviar e-mail via Brevo:', brevoRes.status, await brevoRes.text());
+            }
         }
         return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
     } catch (error) {
