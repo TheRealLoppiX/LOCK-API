@@ -42,14 +42,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // ===================================================================
 // ESQUEMAS DE VALIDAÇÃO (ZOD)
 // ===================================================================
-const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email(), password: z.string().min(6) });
+// Senha mínima de 8 caracteres só nos campos que CRIAM uma senha nova
+// (registro, reset, troca). Campos que verificam uma senha EXISTENTE (login,
+// currentPassword, confirmação de exclusão de conta) continuam em min(6) —
+// contas antigas podem ter senhas de 6-7 caracteres, e subir o mínimo ali
+// derrubaria login de gente que já tem conta.
+const NEW_PASSWORD_MIN = 8;
+const newPasswordField = () => z.string().min(NEW_PASSWORD_MIN, `A senha deve ter pelo menos ${NEW_PASSWORD_MIN} caracteres.`);
+
+const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email(), password: newPasswordField() });
 const loginSchema = z.object({ identifier: z.string().min(3), password: z.string().min(6) });
 const forgotPasswordSchema = z.object({ email: z.string().email() });
-const resetPasswordSchema = z.object({ token: z.string().min(1), password: z.string().min(6) });
+const resetPasswordSchema = z.object({ token: z.string().min(1), password: newPasswordField() });
 const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(6),
-  newPassword: z.string().min(6),
+  newPassword: newPasswordField(),
 });
 const deleteAccountSchema = z.object({ password: z.string().min(6) });
 const AVATAR_MIME_TO_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg' };
@@ -232,7 +240,11 @@ app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } 
 /** @route PUT /profile/update */
 app.put('/profile/update', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const body = updateProfileSchema.parse(request.body);
         if (Object.keys(body).length === 0) {
@@ -273,7 +285,11 @@ function matchesSignature(buffer: Buffer, mimeType: string): boolean {
  */
 app.post('/profile/avatar', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { data: base64, mimeType } = avatarUploadSchema.parse(request.body);
 
@@ -346,7 +362,11 @@ app.post('/profile/avatar', async (request, reply) => {
  */
 app.patch('/profile/password', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { currentPassword, newPassword } = changePasswordSchema.parse(request.body);
 
@@ -382,7 +402,11 @@ app.patch('/profile/password', async (request, reply) => {
  */
 app.delete('/profile', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { password } = deleteAccountSchema.parse(request.body);
 
@@ -518,7 +542,11 @@ app.get('/modules', async (request, reply) => {
 app.get('/modules/:id/questions', async (request, reply) => {
   try {
     // Verifica Token (Necessário para saber QUEM é o usuário para bloquear)
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const user = request.user;
     const { id } = z.object({ id: z.string() }).parse(request.params);
 
@@ -581,7 +609,11 @@ app.get('/modules/:id/questions', async (request, reply) => {
 // ===================================================================
 app.post('/modules/:id/attempt', async (request, reply) => {
   try {
-    await request.jwtVerify(); // Exige login
+    try {
+      await request.jwtVerify(); // Exige login
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
 
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const { answers } = z.object({
@@ -639,7 +671,11 @@ const getQuizQuestionsSchema = z.object({
 
 app.get('/quiz/questions', async (request, reply) => {
   try {
-    await request.jwtVerify(); // Protege a rota
+    try {
+      await request.jwtVerify(); // Protege a rota
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const { topic, difficulty, limit } = getQuizQuestionsSchema.parse(request.query);
 
     // Inicia a query base
@@ -690,7 +726,11 @@ app.get('/quiz/questions', async (request, reply) => {
  */
 app.get('/library/all', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
 
         // Chama a nossa nova super-função, passando o ID do usuário
@@ -717,7 +757,11 @@ app.get('/library/all', async (request, reply) => {
  */
 app.put('/library/status', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { materialId, status } = z.object({
             materialId: z.string().uuid(),
@@ -752,7 +796,11 @@ app.put('/library/status', async (request, reply) => {
  */
 app.put('/library/last-accessed/:materialId', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { materialId } = z.object({ materialId: z.string().uuid() }).parse(request.params);
 
@@ -779,7 +827,11 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
  */
 app.get('/profile/stats', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
 
         const { data: readBooks, error: booksError } = await supabase
@@ -843,7 +895,11 @@ app.get('/profile/stats', async (request, reply) => {
  */
 app.post('/labs/complete', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { labKey } = z.object({ labKey: z.string().min(1).max(100) }).parse(request.body);
 
@@ -866,7 +922,11 @@ app.post('/labs/complete', async (request, reply) => {
  */
 app.post('/quiz/complete', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { topic, difficulty, score, totalQuestions } = z.object({
             topic: z.string().min(1).max(50),
@@ -898,7 +958,11 @@ app.post('/quiz/complete', async (request, reply) => {
 
 app.get('/books/:id', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
         const { data: book, error } = await supabase
@@ -918,7 +982,11 @@ app.get('/books/:id', async (request, reply) => {
 
 app.get('/books/:id/progress', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
@@ -945,7 +1013,11 @@ const updateProgressSchema = z.object({
 
 app.put('/books/:id/progress', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
         const { current_page, is_completed } = updateProgressSchema.parse(request.body);
@@ -969,7 +1041,11 @@ app.put('/books/:id/progress', async (request, reply) => {
 
 app.get('/books/:id/reviews', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
         const { data: reviews, error } = await supabase
@@ -994,7 +1070,11 @@ const createReviewSchema = z.object({
 
 app.post('/books/:id/reviews', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const userId = request.user.sub;
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
         const { rating, comment } = createReviewSchema.parse(request.body);
@@ -1022,7 +1102,11 @@ app.post('/books/:id/reviews', async (request, reply) => {
  */
 app.get('/leaderboard', async (request, reply) => {
     try {
-        await request.jwtVerify();
+        try {
+          await request.jwtVerify();
+        } catch {
+          return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+        }
         const currentUserId = request.user.sub;
 
         const [usersRes, booksRes, examsRes, labsRes, quizzesRes] = await Promise.all([
@@ -1194,13 +1278,28 @@ app.post('/labs/brute-force/2', async (request, reply) => {
   }
 });
 
-const bruteForceTracker: { [ip: string]: { attempts: number, lockUntil: number | null } } = {};
+const bruteForceTracker: { [ip: string]: { attempts: number, lockUntil: number | null, lastSeen: number } } = {};
+// Sem isso, uma entrada por IP único que já passou por este lab fica presa
+// na memória do processo pra sempre (nunca é removida, só reiniciada) —
+// inofensivo no volume de uma turma, mas um memory leak real ao longo de um
+// semestre. Varredura periódica remove IPs inativos há mais de 1h.
+const BRUTE_FORCE_TRACKER_TTL_MS = 60 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const ip of Object.keys(bruteForceTracker)) {
+    if (now - bruteForceTracker[ip].lastSeen > BRUTE_FORCE_TRACKER_TTL_MS) {
+      delete bruteForceTracker[ip];
+    }
+  }
+}, BRUTE_FORCE_TRACKER_TTL_MS).unref();
+
 app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
   const ip = request.ip;
   if (!bruteForceTracker[ip]) {
-    bruteForceTracker[ip] = { attempts: 0, lockUntil: null };
+    bruteForceTracker[ip] = { attempts: 0, lockUntil: null, lastSeen: Date.now() };
   }
   const tracker = bruteForceTracker[ip];
+  tracker.lastSeen = Date.now();
 
   if (tracker.lockUntil && Date.now() < tracker.lockUntil) {
     const timeLeft = Math.ceil((tracker.lockUntil - Date.now()) / 1000);
@@ -1233,7 +1332,11 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
  */
 app.post('/admin/questions/generate', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1256,7 +1359,11 @@ app.post('/admin/questions/generate', async (request, reply) => {
 
 app.get('/admin/questions', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1277,7 +1384,11 @@ app.get('/admin/questions', async (request, reply) => {
 
 app.delete('/admin/questions/:id', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1299,7 +1410,11 @@ app.delete('/admin/questions/:id', async (request, reply) => {
 
 app.post('/admin/questions', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const user = request.user;
 
     if (!user.is_admin) {
@@ -1337,7 +1452,11 @@ app.post('/admin/questions', async (request, reply) => {
 
 app.get('/admin/materials', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1358,7 +1477,11 @@ app.get('/admin/materials', async (request, reply) => {
 
 app.delete('/admin/materials/:id', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1381,7 +1504,11 @@ app.delete('/admin/materials/:id', async (request, reply) => {
 app.post('/admin/materials', async (request, reply) => {
   try {
     // 1. Segurança: Verifica Token e se é Admin
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const user = request.user;
 
     if (!user.is_admin) {
@@ -1429,7 +1556,11 @@ const rehostPdfSchema = z.object({ source_url: z.string().url() });
  */
 app.post('/admin/materials/:id/rehost-pdf', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "⛔ Acesso negado. Apenas administradores." });
     }
@@ -1470,7 +1601,11 @@ app.post('/admin/materials/:id/rehost-pdf', async (request, reply) => {
 
 app.delete('/admin/modules/:id', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     if (!request.user.is_admin) {
       return reply.status(403).send({ message: "Acesso negado." });
     }
@@ -1493,7 +1628,11 @@ app.delete('/admin/modules/:id', async (request, reply) => {
 app.post('/admin/modules', async (request, reply) => {
   try {
     // A. Segurança: Verifica Token e se é Admin
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const user = request.user;
 
     if (!user.is_admin) {
@@ -1541,12 +1680,25 @@ const xssCommentSchema = z.object({
 type XssComment = { userId: string, author: string, site: string, comment: string };
 const xssCommentsDb: XssComment[] = [];
 const xssCommentsDbFiltered: XssComment[] = [];
+// Cada aluno já tem como limpar os próprios comentários (rotas DELETE
+// abaixo), mas nada obriga isso a acontecer — sem um teto, os dois arrays
+// crescem sem limite ao longo de um semestre inteiro sem reiniciar o
+// processo. Ao estourar o teto, descarta os mais antigos primeiro (FIFO).
+const XSS_COMMENTS_MAX = 500;
+function pushXssComment(db: XssComment[], comment: XssComment) {
+  db.push(comment);
+  while (db.length > XSS_COMMENTS_MAX) db.shift();
+}
 
 app.post('/labs/xss/2', async (request, reply) => { // Nível 2 - Salvar comentário
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const { author, site, comment } = xssCommentSchema.parse(request.body);
-    xssCommentsDb.push({ userId: request.user.sub, author, site, comment });
+    pushXssComment(xssCommentsDb, { userId: request.user.sub, author, site, comment });
     return reply.send({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
@@ -1556,7 +1708,11 @@ app.post('/labs/xss/2', async (request, reply) => { // Nível 2 - Salvar coment�
 });
 app.get('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Buscar comentários (só os do próprio usuário)
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const userId = request.user.sub;
     return reply.send(xssCommentsDb.filter((c) => c.userId === userId));
   } catch (error) {
@@ -1566,7 +1722,11 @@ app.get('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Buscar
 });
 app.delete('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Resetar laboratório (limpa só os comentários do próprio usuário)
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const userId = request.user.sub;
     for (let i = xssCommentsDb.length - 1; i >= 0; i--) {
       if (xssCommentsDb[i].userId === userId) xssCommentsDb.splice(i, 1);
@@ -1580,11 +1740,15 @@ app.delete('/labs/xss/2/comments', async (request, reply) => { // Nível 2 - Res
 
 app.post('/labs/xss/3', async (request, reply) => { // Nível 3 - Salvar comentário com filtro
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     let { author, site, comment } = xssCommentSchema.parse(request.body);
     // Filtro ingênuo
     site = site.replace(/alert/gi, "").replace(/<script>/gi, "");
-    xssCommentsDbFiltered.push({ userId: request.user.sub, author, site, comment });
+    pushXssComment(xssCommentsDbFiltered, { userId: request.user.sub, author, site, comment });
     return reply.send({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
@@ -1594,7 +1758,11 @@ app.post('/labs/xss/3', async (request, reply) => { // Nível 3 - Salvar coment�
 });
 app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar comentários filtrados (só os do próprio usuário)
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const userId = request.user.sub;
     return reply.send(xssCommentsDbFiltered.filter((c) => c.userId === userId));
   } catch (error) {
@@ -1604,7 +1772,11 @@ app.get('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Buscar
 });
 app.delete('/labs/xss/3/comments', async (request, reply) => { // Nível 3 - Resetar laboratório (limpa só os comentários do próprio usuário)
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const userId = request.user.sub;
     for (let i = xssCommentsDbFiltered.length - 1; i >= 0; i--) {
       if (xssCommentsDbFiltered[i].userId === userId) xssCommentsDbFiltered.splice(i, 1);
@@ -1654,7 +1826,11 @@ const chatSchema = z.object({
 
 app.post('/ai/chat', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const { message, attachments, history } = chatSchema.parse(request.body);
 
     // Confere que o conteúdo real de cada anexo de imagem bate com o
@@ -1695,7 +1871,11 @@ app.post('/ai/chat', async (request, reply) => {
  */
 app.post('/ai/analyze-quiz', async (request, reply) => {
   try {
-    await request.jwtVerify();
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
     const { wrongQuestions } = z.object({
       wrongQuestions: z.array(z.string().min(1)).min(1).max(20)
     }).parse(request.body);
