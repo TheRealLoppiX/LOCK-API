@@ -2,6 +2,7 @@ import 'dotenv/config';
 import fastify from "fastify";
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import rateLimit from '@fastify/rate-limit';
 import { supabase } from "./supabaseConnection.js";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
@@ -11,7 +12,10 @@ import { looksLikePromptInjection } from './services/PromptGuard.js';
 
 // bodyLimit maior que o padrão (1MB) para caber anexos de imagem/documento
 // em base64 no chat da Aegis — o limite por arquivo é reforçado abaixo.
-const app = fastify({ bodyLimit: 20 * 1024 * 1024 });
+// trustProxy: o serviço roda atrás do proxy do Render; sem isso, request.ip
+// resolveria sempre para o IP do proxy, quebrando qualquer lógica que
+// isole por IP (ex. o rate limiter do lab de força bruta nível 3).
+const app = fastify({ bodyLimit: 28 * 1024 * 1024, trustProxy: true });
 
 // ===================================================================
 // SISTEMA DE XP — fonte única da fórmula, usada por /profile/stats e
@@ -26,6 +30,13 @@ const XP_WEIGHTS = {
 
 function computeXp({ books, labs, quizzes, exams }: { books: number; labs: number; quizzes: number; exams: number }): number {
     return books * XP_WEIGHTS.book + labs * XP_WEIGHTS.lab + quizzes * XP_WEIGHTS.quiz + exams * XP_WEIGHTS.exam;
+}
+
+// Usado pelas rotas de laboratório (sql-injection/brute-force), que fazem
+// destructuring direto de request.body sem schema Zod — sem essa checagem,
+// um POST sem body JSON válido derruba a rota com um TypeError não tratado.
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
 }
 
 // ===================================================================
@@ -83,6 +94,10 @@ app.register(cors, {
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"]
 });
+// Limite generoso por padrão; rotas sensíveis a credential stuffing/brute
+// force (/login, /register, /forgot-password) sobrescrevem com um limite
+// bem mais apertado via `config.rateLimit` na própria definição da rota.
+app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
 
 
 // ===================================================================
@@ -96,7 +111,7 @@ app.get('/ping', async (request, reply) => {
   return reply.send({ message: 'pong' });
 });
 /** @route POST /register */
-app.post('/register', async (request, reply) => {
+app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
   try {
     const { name, email, password } = registerUserSchema.parse(request.body);
 
@@ -152,14 +167,20 @@ app.post('/register', async (request, reply) => {
 });
 
 /** @route POST /login */
-app.post("/login", async (request, reply) => {
+app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     try {
         const { identifier, password } = loginSchema.parse(request.body);
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("*")
-            .or(`email.eq.${identifier},name.eq.${identifier}`)
-            .maybeSingle();
+
+        // Duas consultas .eq() sequenciais e parametrizadas em vez de um único
+        // .or() com o identifier interpolado na string de filtro — o .or() do
+        // PostgREST trata vírgulas/parênteses do input como sintaxe de filtro,
+        // permitindo injetar condições extras (ex. identifier="x,id.gt.0").
+        let user: any = null;
+        let error: any = null;
+        ({ data: user, error } = await supabase.from("users").select("*").eq("email", identifier).maybeSingle());
+        if (!error && !user) {
+            ({ data: user, error } = await supabase.from("users").select("*").eq("name", identifier).maybeSingle());
+        }
 
         if (error) {
             console.error("❌ Erro no Supabase:", error); // LOG DE ERRO REAL
@@ -375,12 +396,18 @@ app.delete('/profile', async (request, reply) => {
             return reply.status(401).send({ message: 'Senha incorreta.' });
         }
 
-        // Limpa os dados dependentes antes do usuário em si — best effort em
-        // cada tabela para que uma falha isolada não impeça as demais de limpar.
+        // Limpa os dados dependentes antes do usuário em si. Não é atomicidade
+        // de verdade (exigiria uma function/RPC no banco) — mas se qualquer
+        // tabela falhar ao limpar, paramos e não seguimos para excluir o
+        // usuário, pra não deixar linhas órfãs apontando pra uma conta que
+        // não existe mais.
         const dependentTables = ['user_library', 'user_exam_attempts', 'user_lab_completions', 'user_quiz_completions', 'reading_progress', 'book_reviews'];
         for (const table of dependentTables) {
             const { error: depError } = await supabase.from(table).delete().eq('user_id', userId);
-            if (depError) console.error(`Erro ao limpar ${table} da conta ${userId}:`, depError);
+            if (depError) {
+                console.error(`Erro ao limpar ${table} da conta ${userId}:`, depError);
+                return reply.status(500).send({ message: 'Erro ao remover dados do usuário. Tente novamente.' });
+            }
         }
 
         await Promise.all(
@@ -404,7 +431,7 @@ app.delete('/profile', async (request, reply) => {
  * @route POST /forgot-password
  * @description Inicia o fluxo de redefinição de palavra-passe.
  */
-app.post("/forgot-password", async (request, reply) => {
+app.post("/forgot-password", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     try {
         const { email } = forgotPasswordSchema.parse(request.body);
         const { data: user } = await supabase.from("users").select("id").eq("email", email).single();
@@ -435,6 +462,12 @@ app.post("/forgot-password", async (request, reply) => {
             if (!brevoRes.ok) {
                 console.error('Erro ao enviar e-mail via Brevo:', brevoRes.status, await brevoRes.text());
             }
+        } else {
+            // Sem isso, a resposta para um e-mail inexistente volta bem mais
+            // rápido que para um existente (que espera a chamada à Brevo
+            // completar) — um atacante consegue medir a diferença de latência
+            // pra enumerar e-mails cadastrados mesmo com a mensagem genérica.
+            await new Promise((resolve) => setTimeout(resolve, 300));
         }
         return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
     } catch (error) {
@@ -501,6 +534,11 @@ app.get('/modules/:id/questions', async (request, reply) => {
       .eq('user_id', user.sub)
       .eq('module_id', id)
       .gte('created_at', today.toISOString()); // Busca tentativas de hoje em diante
+
+    if (attemptError) {
+      console.error('Erro ao verificar tentativas anteriores do simulado:', attemptError);
+      return reply.status(500).send({ message: 'Erro ao verificar tentativas anteriores.' });
+    }
 
     if (attempts && attempts.length > 0) {
       return reply.status(429).send({ 
@@ -683,7 +721,7 @@ app.put('/library/status', async (request, reply) => {
         const userId = request.user.sub;
         const { materialId, status } = z.object({
             materialId: z.string().uuid(),
-            status: z.string()
+            status: z.enum(['A seguir', 'Lendo', 'Parado', 'Lido'])
         }).parse(request.body);
 
         // AGORA, em vez de 'upsert', chamamos nossa função especial via 'rpc'
@@ -1053,6 +1091,9 @@ app.get('/leaderboard', async (request, reply) => {
 
 // --- SQL INJECTION ---
 app.post('/labs/sql-injection/1', async (request, reply) => {
+  if (!isRecord(request.body)) {
+    return reply.status(400).send({ success: false, message: 'Corpo da requisição inválido.' });
+  }
   const { username, password } = request.body as any;
 
   // Lógica de Sucesso: Verifica a presença de uma aspa simples
@@ -1072,6 +1113,9 @@ app.post('/labs/sql-injection/1', async (request, reply) => {
   });
 });
 app.post('/labs/sql-injection/2', async (request, reply) => { // Nível 2
+  if (!isRecord(request.body)) {
+    return reply.status(400).send({ success: false, message: 'Corpo da requisição inválido.' });
+  }
   const { username, password } = request.body as any;
   if (username === `administrator'--`) {
     return reply.send({ success: true, message: 'Autenticação bypassada com sucesso! Redirecionando para o painel de controle...' });
@@ -1080,9 +1124,12 @@ app.post('/labs/sql-injection/2', async (request, reply) => { // Nível 2
 });
 
 app.post('/labs/sql-injection/3', async (request, reply) => { // Nível 3
+  if (!isRecord(request.body)) {
+    return reply.status(400).send({ success: false, message: 'Corpo da requisição inválido.' });
+  }
   const { username, password } = request.body as any;
   const unionPayload = `' UNION SELECT 'Sup3r_S3cr3t_P4ss', NULL --`;
-  if (username.toLowerCase().includes(unionPayload.toLowerCase())) {
+  if (typeof username === 'string' && username.toLowerCase().includes(unionPayload.toLowerCase())) {
     return reply.send({ success: true, message: 'Login bem-sucedido! Bem-vindo de volta, Sup3r_S3cr3t_P4ss.' });
   }
   return reply.status(401).send({ success: false, message: 'Usuário não encontrado.' });
@@ -1090,6 +1137,9 @@ app.post('/labs/sql-injection/3', async (request, reply) => { // Nível 3
 
 // --- BRUTE FORCE ---
 app.post('/labs/brute-force/1', async (request, reply) => { // Nível 1
+  if (!isRecord(request.body)) {
+    return reply.status(400).send({ success: false, message: 'Corpo da requisição inválido.' });
+  }
   const validUsers = ['admin', 'guest'];
   const { username } = request.body as any;
   if (validUsers.includes(username)) {
@@ -1107,12 +1157,14 @@ const generateRandomPassword = () => {
 // ROTA 1: Iniciar o laboratório
 app.post('/labs/brute-force/2/start', async (request, reply) => {
   const password = generateRandomPassword();
-  
-  // A CORREÇÃO ESTÁ AQUI:
-  // A diretiva // @ts-ignore diz ao TypeScript para ignorar o erro de tipo na próxima linha.
-  // É a forma correta de lidar com exceções intencionais como esta.
-  // @ts-ignore 
-  const labToken = await reply.jwtSign({ password }, { expiresIn: '15m' });
+
+  // scope: 'lab' diferencia este token efêmero de um token de sessão real —
+  // os dois são JWTs assinados com o mesmo segredo, então sem um claim que os
+  // distinga não há como saber, só olhando o token, qual dos dois tipos é.
+  const labToken = await reply.jwtSign(
+    { sub: 'lab', name: 'lab', email: 'lab@lock.local', scope: 'lab', password },
+    { expiresIn: '15m' }
+  );
 
   return { labToken };
 });
@@ -1126,7 +1178,10 @@ app.post('/labs/brute-force/2', async (request, reply) => {
     }
 
     // O servidor verifica o token e extrai a senha correta de dentro dele
-    const decodedToken = app.jwt.verify(labToken) as { password: string };
+    const decodedToken = app.jwt.verify(labToken) as { password: string; scope?: string };
+    if (decodedToken.scope !== 'lab') {
+      return reply.status(401).send({ success: false, message: "Token do laboratório inválido ou expirado. Recarregue a página." });
+    }
     const correctPassword = decodedToken.password;
 
     if (passwordGuess === correctPassword) {
@@ -1152,7 +1207,10 @@ app.post('/labs/brute-force/3', async (request, reply) => { // Nível 3
     return reply.status(429).send({ success: false, message: `Muitas tentativas falhas. Tente novamente em ${timeLeft} segundos.` });
   }
   tracker.lockUntil = null;
-  
+
+  if (!isRecord(request.body)) {
+    return reply.status(400).send({ success: false, message: 'Corpo da requisição inválido.' });
+  }
   const { password } = request.body as any;
   if (password === '4815') {
     tracker.attempts = 0;
@@ -1598,6 +1656,18 @@ app.post('/ai/chat', async (request, reply) => {
   try {
     await request.jwtVerify();
     const { message, attachments, history } = chatSchema.parse(request.body);
+
+    // Confere que o conteúdo real de cada anexo de imagem bate com o
+    // mimeType declarado — mesma defesa que /profile/avatar já tinha via
+    // matchesSignature, que faltava aqui.
+    for (const att of attachments || []) {
+      if (att.mimeType === 'image/png' || att.mimeType === 'image/jpeg') {
+        const buffer = Buffer.from(att.data, 'base64');
+        if (!matchesSignature(buffer, att.mimeType)) {
+          return reply.status(400).send({ message: 'Anexo inválido: conteúdo não corresponde ao tipo declarado.' });
+        }
+      }
+    }
 
     // Camada extra e local, antes de gastar qualquer chamada de IA no
     // LOCKIA-API: uma varredura barata por padrões conhecidos de prompt

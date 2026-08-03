@@ -18,12 +18,11 @@
   "dependencies": {
     "@fastify/cors": "^11.1.0",
     "@fastify/jwt": "^10.0.0",
+    "@fastify/rate-limit": "^11.2.0",
     "@supabase/supabase-js": "^2.57.2",
     "bcrypt": "^6.0.0",
     "dotenv": "^17.2.2",
     "fastify": "^5.6.0",
-    "pdfjs-dist": "^4.4.168",
-    "react-pdf": "^9.1.0",
     "tsup": "^8.5.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
