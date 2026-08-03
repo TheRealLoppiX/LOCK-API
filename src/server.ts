@@ -474,7 +474,13 @@ app.post("/forgot-password", { config: { rateLimit: { max: 10, timeWindow: '1 mi
                     'api-key': process.env.BREVO_API_KEY!,
                 },
                 body: JSON.stringify({
-                    sender: { name: 'LOCK Platform', email: 'tutuzao2016@gmail.com' },
+                    // tutuzao2016@gmail.com nunca foi verificado como sender na Brevo
+                    // (a conta em si é dona desse e-mail, mas isso não basta pra
+                    // enviar transacional) — todo envio caía num "error" silencioso
+                    // (rejeitado pela Brevo, sem propagar pro cliente). O domínio
+                    // schednext.com.br já está autenticado via DNS, então qualquer
+                    // remetente nele funciona sem verificação individual.
+                    sender: { name: 'LOCK Platform', email: 'lock@schednext.com.br' },
                     to: [{ email }],
                     subject: 'O seu Link de Redefinição de Palavra-passe',
                     htmlContent: `<p>Clique aqui para redefinir a sua senha no LOCK:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Se você não pediu essa redefinição, ignore este e-mail.</p>`,
