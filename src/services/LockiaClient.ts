@@ -25,8 +25,11 @@ async function callLockia<T>(path: string, authorization: string, body: unknown)
 }
 
 export const lockiaClient = {
+  // persona: 'aegis' avisa o LOCKIA-API que quem está chamando é o chat
+  // embutido do LOCK — sem isso, a IA responde como "IA do LOCKIA" mesmo
+  // aqui, já que os dois produtos passam pelo mesmo endpoint /chat.
   chat: (authorization: string, body: { message: string; attachments?: unknown[]; history?: unknown[] }) =>
-    callLockia<{ response: string }>('/chat', authorization, body),
+    callLockia<{ response: string }>('/chat', authorization, { ...body, persona: 'aegis' }),
 
   analyzeQuiz: (authorization: string, wrongQuestions: string[]) =>
     callLockia<{ analysis: string }>('/analyze-quiz', authorization, { wrongQuestions }),
