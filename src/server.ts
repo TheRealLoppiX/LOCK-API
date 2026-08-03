@@ -6,7 +6,8 @@ import { supabase } from "./supabaseConnection.js";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { aiService } from './services/AiService.js';
+import { lockiaClient } from './services/LockiaClient.js';
+import { looksLikePromptInjection } from './services/PromptGuard.js';
 
 // bodyLimit maior que o padrão (1MB) para caber anexos de imagem/documento
 // em base64 no chat da Aegis — o limite por arquivo é reforçado abaixo.
@@ -271,7 +272,7 @@ app.post('/profile/avatar', async (request, reply) => {
         // de deixar passar — a foto fica visível publicamente no site.
         let moderation;
         try {
-            moderation = await aiService.moderateImage(base64, mimeType);
+            moderation = await lockiaClient.moderateImage(request.headers.authorization!, base64, mimeType);
         } catch (moderationError) {
             console.error('Erro ao moderar imagem de perfil:', moderationError);
             return reply.status(502).send({ message: 'Não foi possível verificar a imagem agora. Tente novamente em instantes.' });
@@ -1184,7 +1185,7 @@ app.post('/admin/questions/generate', async (request, reply) => {
       quantidade: z.coerce.number().int().min(1).max(10),
     }).parse(request.body);
 
-    const questoes = await aiService.gerarQuestoesIA(tema, quantidade);
+    const { questoes } = await lockiaClient.generateQuestions(request.headers.authorization!, tema, quantidade);
     return reply.send({ questoes });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -1598,11 +1599,16 @@ app.post('/ai/chat', async (request, reply) => {
     await request.jwtVerify();
     const { message, attachments, history } = chatSchema.parse(request.body);
 
-    // O modelo de visão (usado quando há imagem anexada) "pensa" antes de
-    // responder e essa etapa consome tokens da própria resposta — um budget
-    // maior evita que a resposta final saia cortada nesses casos.
-    const hasImageAttachment = (attachments || []).some((a) => a.mimeType.startsWith('image/'));
-    const response = await aiService.askAegis(message, hasImageAttachment ? 1400 : 800, attachments, history);
+    // Camada extra e local, antes de gastar qualquer chamada de IA no
+    // LOCKIA-API: uma varredura barata por padrões conhecidos de prompt
+    // injection. O LOCKIA-API continua rodando seu próprio classificador
+    // sobre tudo que recebe de qualquer forma — isso aqui é defesa em
+    // profundidade, não substituição.
+    if (looksLikePromptInjection(message)) {
+      return reply.send({ response: 'Não posso processar essa mensagem — parece uma tentativa de manipular minhas instruções. Pode reformular sua pergunta sobre cibersegurança?' });
+    }
+
+    const { response } = await lockiaClient.chat(request.headers.authorization!, { message, attachments, history });
     return reply.send({ response });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -1624,7 +1630,7 @@ app.post('/ai/analyze-quiz', async (request, reply) => {
       wrongQuestions: z.array(z.string().min(1)).min(1).max(20)
     }).parse(request.body);
 
-    const analysis = await aiService.analisarErros(wrongQuestions);
+    const { analysis } = await lockiaClient.analyzeQuiz(request.headers.authorization!, wrongQuestions);
     return reply.send({ analysis });
   } catch (error) {
     if (error instanceof z.ZodError) {
