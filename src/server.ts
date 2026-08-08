@@ -174,6 +174,13 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
   }
 });
 
+// Hash dummy fixo, comparado quando o usuário não existe, só para consumir
+// aproximadamente o mesmo tempo que um bcrypt.compare real levaria — sem
+// isso, uma resposta para identifier inexistente volta bem mais rápido que
+// uma com senha errada (que espera o bcrypt.compare completar), permitindo
+// enumerar e-mails/usuários cadastrados só medindo a latência do /login.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('lock-timing-safety-dummy', 10);
+
 /** @route POST /login */
 app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     try {
@@ -197,6 +204,7 @@ app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } 
 
         if (!user) {
             console.log("⚠️ Usuário não encontrado:", identifier);
+            await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
             return reply.status(401).send({ message: "Credenciais inválidas" });
         }
 
@@ -605,6 +613,9 @@ app.get('/modules/:id/questions', async (request, reply) => {
     return { module: moduleData, questions };
 
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'ID inválido.' });
+    }
     console.error("Erro ao buscar prova:", error);
     return reply.status(500).send({ message: "Erro interno." });
   }
@@ -710,6 +721,9 @@ app.get('/quiz/questions', async (request, reply) => {
 
     return reply.send(selectedQuestions);
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ error: 'Parâmetros inválidos.', issues: error.format() });
+    }
     console.error("Erro ao buscar perguntas do quiz:", error);
     return reply.status(500).send({ error: "Erro ao buscar perguntas" });
   }
@@ -785,12 +799,12 @@ app.put('/library/status', async (request, reply) => {
 
         return reply.status(200).send({ message: 'Status atualizado com sucesso' });
 
-    } catch (error:any) {
+    } catch (error: any) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+        }
         console.error('Erro ao atualizar status do material:', error);
-        return reply.status(500).send({ 
-            error: 'Erro ao atualizar status',
-            details: error.message || error 
-        });
+        return reply.status(500).send({ error: 'Erro ao atualizar status' });
     }
 });
 
@@ -820,6 +834,9 @@ app.put('/library/last-accessed/:materialId', async (request, reply) => {
         return reply.status(200).send({ message: 'Último material acessado salvo com sucesso' });
 
     } catch (error) {
+        if (error instanceof z.ZodError) {
+            return reply.status(400).send({ message: 'ID inválido.' });
+        }
         console.error('Erro ao salvar último material acessado:', error);
         return reply.status(500).send({ error: 'Erro ao salvar último material acessado' });
     }
@@ -1451,6 +1468,9 @@ app.post('/admin/questions', async (request, reply) => {
     return reply.status(201).send({ message: "Questão cadastrada com sucesso!" });
 
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
     console.error("Erro ao cadastrar:", error);
     return reply.status(500).send({ message: "Erro ao salvar questão." });
   }
