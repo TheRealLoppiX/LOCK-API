@@ -575,7 +575,11 @@ app.get('/modules/:id/questions', async (request, reply) => {
       .select('id')
       .eq('user_id', user.sub)
       .eq('module_id', id)
-      .gte('created_at', today.toISOString()); // Busca tentativas de hoje em diante
+      // user_exam_attempts não tem coluna created_at — só completed_at
+      // (default now()). Usar created_at aqui quebrava essa checagem com
+      // 42703 (coluna inexistente) em QUALQUER simulado, mesmo sem nenhuma
+      // tentativa registrada ainda.
+      .gte('completed_at', today.toISOString()); // Busca tentativas de hoje em diante
 
     if (attemptError) {
       console.error('Erro ao verificar tentativas anteriores do simulado:', attemptError);
