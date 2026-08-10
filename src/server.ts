@@ -1133,7 +1133,7 @@ app.get('/leaderboard', async (request, reply) => {
         const currentUserId = request.user.sub;
 
         const [usersRes, booksRes, examsRes, labsRes, quizzesRes] = await Promise.all([
-            supabase.from('users').select('id, name, avatar_url'),
+            supabase.from('users').select('id, name, avatar_url, is_admin'),
             supabase.from('user_library').select('user_id').eq('status', 'Lido'),
             supabase.from('user_exam_attempts').select('user_id, score, total_questions'),
             supabase.from('user_lab_completions').select('user_id'),
@@ -1167,7 +1167,10 @@ app.get('/leaderboard', async (request, reply) => {
             quizComboByUser.set(q.user_id, set);
         }
 
+        // Conta admin não é aluno de verdade — não deve competir/aparecer no
+        // ranking. Se o próprio admin chamar essa rota, currentUser volta null.
         const ranked = (usersRes.data || [])
+            .filter((u) => !u.is_admin)
             .map((u) => ({
                 id: u.id,
                 name: u.name,
