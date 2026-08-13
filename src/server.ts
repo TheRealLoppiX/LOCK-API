@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { z } from 'zod';
 import { lockiaClient } from './services/LockiaClient.js';
 import { looksLikePromptInjection } from './services/PromptGuard.js';
+import { sendEmail } from './services/MailService.js';
 
 // bodyLimit maior que o padrão (1MB) para caber anexos de imagem/documento
 // em base64 no chat da Aegis — o limite por arquivo é reforçado abaixo.
@@ -155,12 +156,21 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
       throw new Error("Falha ao criar usuário, dados não retornados.");
     }
 
+    // Não bloqueia nem falha o registro se o e-mail não sair (sendEmail nunca
+    // lança) — cobre tanto o cadastro pelo LOCK quanto pelo LOCKIA, já que os
+    // dois chamam este mesmo /register.
+    sendEmail(
+      newUser.email,
+      'Bem-vindo(a) ao LOCK!',
+      `<p>Olá, ${newUser.name}!</p><p>A sua conta no LOCK foi criada com sucesso. Com ela você acessa tanto a plataforma educacional (laboratórios, quizzes, simulados e biblioteca) quanto o LOCKIA, o assistente de IA para cibersegurança.</p><p>Bons estudos!</p>`
+    );
+
     const token = app.jwt.sign({
       sub: newUser.id.toString(),
       name: newUser.name,
       email: newUser.email,
       avatar_url: newUser.avatar_url,
-    });
+    }, { expiresIn: '7 days' });
 
     return reply.status(201).send({ token });
 
@@ -474,32 +484,11 @@ app.post("/forgot-password", { config: { rateLimit: { max: 10, timeWindow: '1 mi
             await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
             const resetUrl = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/reset-password/${resetToken}`;
 
-            const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Accept: 'application/json',
-                    'api-key': process.env.BREVO_API_KEY!,
-                },
-                body: JSON.stringify({
-                    // tutuzao2016@gmail.com nunca foi verificado como sender na Brevo
-                    // (a conta em si é dona desse e-mail, mas isso não basta pra
-                    // enviar transacional) — todo envio caía num "error" silencioso
-                    // (rejeitado pela Brevo, sem propagar pro cliente). O domínio
-                    // schednext.com.br já está autenticado via DNS, então qualquer
-                    // remetente nele funciona sem verificação individual.
-                    sender: { name: 'LOCK Platform', email: 'lock@schednext.com.br' },
-                    to: [{ email }],
-                    subject: 'O seu Link de Redefinição de Palavra-passe',
-                    htmlContent: `<p>Clique aqui para redefinir a sua senha no LOCK:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Se você não pediu essa redefinição, ignore este e-mail.</p>`,
-                }),
-            });
-            // Não propaga o erro pro cliente (a mensagem de resposta é sempre a
-            // mesma, exista ou não o e-mail — evita enumeração de usuários),
-            // mas registra pra dar pra diagnosticar problemas de envio.
-            if (!brevoRes.ok) {
-                console.error('Erro ao enviar e-mail via Brevo:', brevoRes.status, await brevoRes.text());
-            }
+            await sendEmail(
+                email,
+                'O seu Link de Redefinição de Palavra-passe',
+                `<p>Clique aqui para redefinir a sua senha no LOCK:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Se você não pediu essa redefinição, ignore este e-mail.</p>`
+            );
         } else {
             // Sem isso, a resposta para um e-mail inexistente volta bem mais
             // rápido que para um existente (que espera a chamada à Brevo
