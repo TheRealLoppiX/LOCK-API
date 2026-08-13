@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { lockiaClient } from './services/LockiaClient.js';
 import { looksLikePromptInjection } from './services/PromptGuard.js';
 import { sendEmail } from './services/MailService.js';
+import { PDFParse } from 'pdf-parse';
 
 // bodyLimit maior que o padrão (1MB) para caber anexos de imagem/documento
 // em base64 no chat da Aegis — o limite por arquivo é reforçado abaixo.
@@ -287,6 +288,7 @@ const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 const FILE_SIGNATURES: Record<string, number[]> = {
     'image/png': [0x89, 0x50, 0x4e, 0x47],
     'image/jpeg': [0xff, 0xd8, 0xff],
+    'application/pdf': [0x25, 0x50, 0x44, 0x46], // "%PDF"
 };
 
 function matchesSignature(buffer: Buffer, mimeType: string): boolean {
@@ -1914,6 +1916,141 @@ app.post('/ai/analyze-quiz', async (request, reply) => {
 });
 
 // ===================================================================
+// COWORK — CERTIFICADOS DE AUTORIZAÇÃO
+// O modo Cowork (LOCKIA) exigia só um texto livre descrevendo o escopo
+// autorizado — trivial de inventar. Aqui o usuário envia um PDF (o
+// documento/certificado de autorização de verdade); o texto é extraído e
+// validado no upload, guardado junto com o PDF original (Supabase Storage,
+// bucket privado) numa tabela própria, e o texto extraído passa a ser o
+// "escopo declarado" reenviado a cada mensagem do Cowork — no lugar do
+// campo de texto livre que existia antes.
+// ===================================================================
+const COWORK_AUTH_BUCKET = 'cowork-authorizations';
+const MAX_COWORK_AUTH_BYTES = 10 * 1024 * 1024;
+// Teto no texto extraído — generoso o bastante para um documento de
+// autorização real (várias páginas), mas sem deixar um PDF gigante inflar
+// indefinidamente a coluna no banco nem o prompt enviado à Groq a cada
+// mensagem do Cowork.
+const MAX_COWORK_AUTH_TEXT_CHARS = 8000;
+// Abaixo disso, o PDF provavelmente não tem texto selecionável de verdade
+// (ex: só um scan sem OCR, ou um documento em branco) — o validador rejeita
+// em vez de aceitar um "escopo declarado" vazio ou inútil pro classificador
+// do Cowork.
+const MIN_COWORK_AUTH_TEXT_CHARS = 50;
+
+const coworkAuthUploadSchema = z.object({
+  fileName: z.string().min(1).max(200),
+  data: z.string().min(1, 'Nenhum arquivo enviado.'),
+});
+
+/**
+ * @route POST /cowork/authorizations
+ * @description Recebe um PDF de certificado/autorização, valida que é
+ * mesmo um PDF com texto legível, extrai o texto, guarda o arquivo original
+ * no Storage e registra tudo na tabela cowork_authorizations.
+ */
+app.post('/cowork/authorizations', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    const userId = request.user.sub;
+    const { fileName, data } = coworkAuthUploadSchema.parse(request.body);
+
+    const buffer = Buffer.from(data, 'base64');
+    if (buffer.length === 0) {
+      return reply.status(400).send({ message: 'Não foi possível ler o arquivo enviado.' });
+    }
+    if (buffer.length > MAX_COWORK_AUTH_BYTES) {
+      return reply.status(400).send({ message: 'O PDF passa do limite de 10MB.' });
+    }
+    if (!matchesSignature(buffer, 'application/pdf')) {
+      return reply.status(400).send({ message: 'O arquivo enviado não é um PDF válido.' });
+    }
+
+    let extractedText = '';
+    const parser = new PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      extractedText = result.text
+        // Marcador de fim de página que o pdf-parse insere entre páginas
+        // (ex: "-- 1 of 3 --") — não é conteúdo do documento, só ruído que
+        // atrapalharia o classificador do Cowork lendo isso como "escopo".
+        .replace(/--\s*\d+\s+of\s+\d+\s*--/g, '')
+        .trim()
+        .replace(/\s+\n/g, '\n')
+        .slice(0, MAX_COWORK_AUTH_TEXT_CHARS);
+    } catch (parseError) {
+      console.error('Erro ao extrair texto do PDF de autorização:', parseError);
+    } finally {
+      await parser.destroy();
+    }
+
+    if (extractedText.length < MIN_COWORK_AUTH_TEXT_CHARS) {
+      return reply.status(422).send({
+        message: 'Não foi possível extrair texto legível deste PDF. Envie um documento com texto selecionável (não uma imagem escaneada sem OCR).',
+      });
+    }
+
+    const path = `${userId}/${crypto.randomUUID()}.pdf`;
+    const { error: uploadError } = await supabase.storage
+      .from(COWORK_AUTH_BUCKET)
+      .upload(path, buffer, { contentType: 'application/pdf' });
+    if (uploadError) throw uploadError;
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('cowork_authorizations')
+      .insert({ user_id: userId, file_name: fileName, storage_path: path, extracted_text: extractedText })
+      .select('id, file_name, extracted_text, created_at')
+      .single();
+    if (insertError) {
+      // Não deixa o arquivo órfão no Storage se o registro no banco falhar.
+      await supabase.storage.from(COWORK_AUTH_BUCKET).remove([path]).catch(() => {});
+      throw insertError;
+    }
+
+    return reply.status(201).send(inserted);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: error.issues[0]?.message || 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro ao processar certificado de autorização do Cowork:', error);
+    return reply.status(500).send({ message: 'Erro interno ao processar o PDF.' });
+  }
+});
+
+/**
+ * @route GET /cowork/authorizations
+ * @description Lista os certificados de autorização já enviados pelo
+ * próprio usuário autenticado (nunca de outro usuário — filtrado por
+ * user_id no servidor, não confia em nenhum parâmetro do cliente).
+ */
+app.get('/cowork/authorizations', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    const userId = request.user.sub;
+
+    const { data, error } = await supabase
+      .from('cowork_authorizations')
+      .select('id, file_name, extracted_text, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    return reply.send(data || []);
+  } catch (error) {
+    console.error('Erro ao listar certificados de autorização do Cowork:', error);
+    return reply.status(500).send({ message: 'Erro interno ao listar certificados.' });
+  }
+});
+
+// ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
 async function ensureAvatarBucket() {
@@ -1931,7 +2068,26 @@ async function ensureAvatarBucket() {
     }
 }
 
-ensureAvatarBucket().finally(() => {
+// Privado (diferente de AVATAR_BUCKET/BOOKS_BUCKET, que são públicos) — um
+// certificado de autorização pode conter nome de cliente, domínio/IP real
+// do alvo do teste, e outros dados sensíveis do engajamento, então nunca
+// deve ficar acessível por URL pública.
+async function ensureCoworkAuthBucket() {
+    const { data: existing } = await supabase.storage.getBucket(COWORK_AUTH_BUCKET);
+    if (existing) return;
+    const { error } = await supabase.storage.createBucket(COWORK_AUTH_BUCKET, {
+        public: false,
+        fileSizeLimit: MAX_COWORK_AUTH_BYTES,
+        allowedMimeTypes: ['application/pdf'],
+    });
+    if (error) {
+        console.error(`⚠️  Não foi possível criar/verificar o bucket "${COWORK_AUTH_BUCKET}" do Supabase Storage:`, error.message);
+    } else {
+        console.log(`📦 Bucket "${COWORK_AUTH_BUCKET}" criado no Supabase Storage.`);
+    }
+}
+
+Promise.all([ensureAvatarBucket(), ensureCoworkAuthBucket()]).finally(() => {
     app.listen({
         host: "0.0.0.0",
         port: process.env.PORT ? Number(process.env.PORT) : 3333,
