@@ -56,7 +56,11 @@ const registerUserSchema = z.object({ name: z.string().min(3), email: z.string()
 const loginSchema = z.object({ identifier: z.string().min(3), password: z.string().min(6) });
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const resetPasswordSchema = z.object({ token: z.string().min(1), password: newPasswordField() });
-const updateProfileSchema = z.object({ name: z.string().min(3).optional(), avatar_url: z.string().url().optional() });
+// avatar_url de propósito NÃO está aqui — trocar avatar tem que passar por
+// POST /profile/avatar, que modera o conteúdo (matchesSignature + IA) antes
+// de aceitar. Aceitar uma URL livre aqui contornava essa moderação por
+// completo.
+const updateProfileSchema = z.object({ name: z.string().min(3).optional() });
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(6),
   newPassword: newPasswordField(),
@@ -201,11 +205,15 @@ app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } 
         // .or() com o identifier interpolado na string de filtro — o .or() do
         // PostgREST trata vírgulas/parênteses do input como sintaxe de filtro,
         // permitindo injetar condições extras (ex. identifier="x,id.gt.0").
+        // Lista explícita de colunas (não select('*')) — sem isso, qualquer
+        // coluna sensível nova da tabela users (ex: reset_token) vaza na
+        // resposta do login sem ninguém perceber.
+        const LOGIN_USER_COLUMNS = 'id, name, email, password, avatar_url, is_admin';
         let user: any = null;
         let error: any = null;
-        ({ data: user, error } = await supabase.from("users").select("*").eq("email", identifier).maybeSingle());
+        ({ data: user, error } = await supabase.from("users").select(LOGIN_USER_COLUMNS).eq("email", identifier).maybeSingle());
         if (!error && !user) {
-            ({ data: user, error } = await supabase.from("users").select("*").eq("name", identifier).maybeSingle());
+            ({ data: user, error } = await supabase.from("users").select(LOGIN_USER_COLUMNS).eq("name", identifier).maybeSingle());
         }
 
         if (error) {
@@ -292,6 +300,16 @@ const FILE_SIGNATURES: Record<string, number[]> = {
 };
 
 function matchesSignature(buffer: Buffer, mimeType: string): boolean {
+    // WEBP não tem uma assinatura contígua a partir do byte 0 (é um
+    // container RIFF: "RIFF" nos bytes 0-3, tamanho nos 4-7, "WEBP" só nos
+    // 8-11) — não cabe no formato de array simples usado pelos outros tipos.
+    if (mimeType === 'image/webp') {
+        return (
+            buffer.length >= 12 &&
+            buffer.toString('ascii', 0, 4) === 'RIFF' &&
+            buffer.toString('ascii', 8, 12) === 'WEBP'
+        );
+    }
     const signature = FILE_SIGNATURES[mimeType];
     if (!signature) return false;
     return signature.every((byte, i) => buffer[i] === byte);
@@ -544,6 +562,31 @@ app.get('/modules', async (request, reply) => {
     return reply.status(500).send({ message: "Erro ao carregar simulados." });
   }
 });
+// Usada tanto por GET /modules/:id/questions (bloqueia antes de entregar as
+// perguntas) quanto por POST /modules/:id/attempt (bloqueia antes de gravar
+// o resultado) — sem essa segunda checagem, dava pra chamar o POST direto
+// (sem nunca passar pelo GET) e gravar quantas tentativas quisesse no mesmo
+// dia, rendendo XP ilimitado e servindo de oráculo pra descobrir o gabarito
+// por tentativa e erro.
+async function hasAttemptedModuleToday(userId: string, moduleId: string): Promise<boolean> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Zera o horário para pegar o início do dia
+
+  // user_exam_attempts não tem coluna created_at — só completed_at (default
+  // now()). Usar created_at aqui quebrava essa checagem com 42703 (coluna
+  // inexistente) em QUALQUER simulado, mesmo sem nenhuma tentativa
+  // registrada ainda.
+  const { data: attempts, error } = await supabase
+    .from('user_exam_attempts')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('module_id', moduleId)
+    .gte('completed_at', today.toISOString());
+
+  if (error) throw error;
+  return !!(attempts && attempts.length > 0);
+}
+
 app.get('/modules/:id/questions', async (request, reply) => {
   try {
     // Verifica Token (Necessário para saber QUEM é o usuário para bloquear)
@@ -558,28 +601,17 @@ app.get('/modules/:id/questions', async (request, reply) => {
     // ============================================================
     // 1. VERIFICAÇÃO DE "UMA VEZ POR DIA"
     // ============================================================
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Zera o horário para pegar o início do dia
-
-    const { data: attempts, error: attemptError } = await supabase
-      .from('user_exam_attempts')
-      .select('id')
-      .eq('user_id', user.sub)
-      .eq('module_id', id)
-      // user_exam_attempts não tem coluna created_at — só completed_at
-      // (default now()). Usar created_at aqui quebrava essa checagem com
-      // 42703 (coluna inexistente) em QUALQUER simulado, mesmo sem nenhuma
-      // tentativa registrada ainda.
-      .gte('completed_at', today.toISOString()); // Busca tentativas de hoje em diante
-
-    if (attemptError) {
+    let alreadyAttemptedToday: boolean;
+    try {
+      alreadyAttemptedToday = await hasAttemptedModuleToday(user.sub, id);
+    } catch (attemptError) {
       console.error('Erro ao verificar tentativas anteriores do simulado:', attemptError);
       return reply.status(500).send({ message: 'Erro ao verificar tentativas anteriores.' });
     }
 
-    if (attempts && attempts.length > 0) {
-      return reply.status(429).send({ 
-        message: "⛔ Você já realizou este simulado hoje. Tente novamente amanhã ou escolha outro módulo." 
+    if (alreadyAttemptedToday) {
+      return reply.status(429).send({
+        message: "⛔ Você já realizou este simulado hoje. Tente novamente amanhã ou escolha outro módulo."
       });
     }
 
@@ -631,6 +663,20 @@ app.post('/modules/:id/attempt', async (request, reply) => {
     const { answers } = z.object({
       answers: z.record(z.string(), z.string())
     }).parse(request.body);
+
+    // Mesma checagem do GET /modules/:id/questions, repetida aqui — sem
+    // isso, chamar este POST direto (sem passar pelo GET) driblava o limite
+    // de "uma tentativa por dia" por completo.
+    try {
+      if (await hasAttemptedModuleToday(request.user.sub, id)) {
+        return reply.status(429).send({
+          message: "⛔ Você já realizou este simulado hoje. Tente novamente amanhã ou escolha outro módulo."
+        });
+      }
+    } catch (attemptError) {
+      console.error('Erro ao verificar tentativas anteriores do simulado:', attemptError);
+      return reply.status(500).send({ message: 'Erro ao verificar tentativas anteriores.' });
+    }
 
     // A nota é sempre calculada no servidor a partir do gabarito real —
     // nunca confiamos numa nota calculada pelo cliente.
@@ -862,7 +908,7 @@ app.get('/profile/stats', async (request, reply) => {
 
         const { data: examAttempts, error: examsError } = await supabase
             .from('user_exam_attempts')
-            .select('id, score, total_questions, completed_at, module:exam_modules(title, cover_url)')
+            .select('id, module_id, score, total_questions, completed_at, module:exam_modules(title, cover_url)')
             .eq('user_id', userId);
 
         if (examsError) throw examsError;
@@ -881,7 +927,13 @@ app.get('/profile/stats', async (request, reply) => {
 
         if (quizzesError) throw quizzesError;
 
-        const passedExamsCount = (examAttempts || []).filter((e) => e.score / e.total_questions >= 0.7).length;
+        // Conta uma vez por módulo aprovado (não por tentativa) — sem isso,
+        // repetir o mesmo simulado em dias diferentes inflava o XP de exame
+        // indefinidamente, diferente de livros/labs/quizzes, que já são
+        // deduplicados.
+        const passedExamsCount = new Set(
+            (examAttempts || []).filter((e) => e.score / e.total_questions >= 0.7).map((e) => e.module_id)
+        ).size;
         // XP de quiz conta uma vez por combinação única de tópico+dificuldade,
         // pra não incentivar ficar repetindo o mesmo quiz só por XP.
         const uniqueQuizCombos = new Set((quizCompletions || []).map((q) => `${q.topic}::${q.difficulty}`));
@@ -1097,12 +1149,22 @@ app.post('/books/:id/reviews', async (request, reply) => {
         const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
         const { rating, comment } = createReviewSchema.parse(request.body);
 
-        const { error } = await supabase.from('book_reviews').insert({
-            user_id: userId,
-            book_id: id,
-            rating,
-            comment,
-        });
+        // book_reviews não tem constraint única (user_id, book_id) no banco
+        // — sem essa checagem, chamar esta rota várias vezes criava uma
+        // avaliação nova a cada vez, multiplicando o peso do mesmo usuário
+        // na média/contagem exibida. Atualiza a avaliação existente em vez
+        // de inserir outra.
+        const { data: existing, error: existingError } = await supabase
+            .from('book_reviews')
+            .select('id')
+            .eq('user_id', userId)
+            .eq('book_id', id)
+            .maybeSingle();
+        if (existingError) throw existingError;
+
+        const { error } = existing
+            ? await supabase.from('book_reviews').update({ rating, comment }).eq('id', existing.id)
+            : await supabase.from('book_reviews').insert({ user_id: userId, book_id: id, rating, comment });
 
         if (error) throw error;
         return reply.status(201).send({ message: 'Avaliação enviada!' });
@@ -1130,7 +1192,7 @@ app.get('/leaderboard', async (request, reply) => {
         const [usersRes, booksRes, examsRes, labsRes, quizzesRes] = await Promise.all([
             supabase.from('users').select('id, name, avatar_url, is_admin'),
             supabase.from('user_library').select('user_id').eq('status', 'Lido'),
-            supabase.from('user_exam_attempts').select('user_id, score, total_questions'),
+            supabase.from('user_exam_attempts').select('user_id, module_id, score, total_questions'),
             supabase.from('user_lab_completions').select('user_id'),
             supabase.from('user_quiz_completions').select('user_id, topic, difficulty'),
         ]);
@@ -1148,10 +1210,15 @@ app.get('/leaderboard', async (request, reply) => {
         const bookCounts = countBy(booksRes.data);
         const labCounts = countBy(labsRes.data);
 
-        const examPassedByUser = new Map<string, number>();
+        // Set por usuário (módulos aprovados), não contador de tentativas —
+        // mesmo raciocínio do /profile/stats: repetir o mesmo simulado não
+        // deve multiplicar XP.
+        const examPassedModulesByUser = new Map<string, Set<string>>();
         for (const attempt of examsRes.data || []) {
             if (attempt.total_questions > 0 && attempt.score / attempt.total_questions >= 0.7) {
-                examPassedByUser.set(attempt.user_id, (examPassedByUser.get(attempt.user_id) || 0) + 1);
+                const set = examPassedModulesByUser.get(attempt.user_id) || new Set<string>();
+                set.add(attempt.module_id);
+                examPassedModulesByUser.set(attempt.user_id, set);
             }
         }
 
@@ -1174,7 +1241,7 @@ app.get('/leaderboard', async (request, reply) => {
                     books: bookCounts.get(u.id) || 0,
                     labs: labCounts.get(u.id) || 0,
                     quizzes: quizComboByUser.get(u.id)?.size || 0,
-                    exams: examPassedByUser.get(u.id) || 0,
+                    exams: examPassedModulesByUser.get(u.id)?.size || 0,
                 }),
             }))
             .sort((a, b) => b.totalXp - a.totalXp)
@@ -1259,15 +1326,33 @@ const generateRandomPassword = () => {
   return Math.random().toString(36).slice(-8); // Gera 8 caracteres alfanuméricos
 };
 
+// Um JWT é ASSINADO, não CIFRADO — qualquer claim dentro dele é só base64url,
+// legível por quem quer que decodifique o próprio token que recebeu (ex:
+// colando em jwt.io). Guardar a senha correta como claim (como este endpoint
+// fazia antes) deixava o nível resolvível só lendo o payload do token, sem
+// nenhuma tentativa de força bruta de verdade. Agora o token carrega só um
+// labId opaco; a senha em si fica só na memória do servidor, associada a
+// esse id.
+const bruteForceLab2Passwords = new Map<string, { password: string; expiresAt: number }>();
+const BRUTE_FORCE_LAB2_TTL_MS = 15 * 60 * 1000; // mesmo tempo do expiresIn do JWT
+setInterval(() => {
+  const now = Date.now();
+  for (const [labId, entry] of bruteForceLab2Passwords) {
+    if (now > entry.expiresAt) bruteForceLab2Passwords.delete(labId);
+  }
+}, BRUTE_FORCE_LAB2_TTL_MS).unref();
+
 // ROTA 1: Iniciar o laboratório
 app.post('/labs/brute-force/2/start', async (request, reply) => {
   const password = generateRandomPassword();
+  const labId = crypto.randomUUID();
+  bruteForceLab2Passwords.set(labId, { password, expiresAt: Date.now() + BRUTE_FORCE_LAB2_TTL_MS });
 
   // scope: 'lab' diferencia este token efêmero de um token de sessão real —
   // os dois são JWTs assinados com o mesmo segredo, então sem um claim que os
   // distinga não há como saber, só olhando o token, qual dos dois tipos é.
   const labToken = await reply.jwtSign(
-    { sub: 'lab', name: 'lab', email: 'lab@lock.local', scope: 'lab', password },
+    { sub: 'lab', name: 'lab', email: 'lab@lock.local', scope: 'lab', labId },
     { expiresIn: '15m' }
   );
 
@@ -1282,12 +1367,17 @@ app.post('/labs/brute-force/2', async (request, reply) => {
       return reply.status(400).send({ success: false, message: "Token do laboratório não fornecido." });
     }
 
-    // O servidor verifica o token e extrai a senha correta de dentro dele
-    const decodedToken = app.jwt.verify(labToken) as { password: string; scope?: string };
+    // O token só identifica QUAL laboratório (labId) — a senha correta é
+    // buscada no servidor, nunca lida direto do token.
+    const decodedToken = app.jwt.verify(labToken) as { labId: string; scope?: string };
     if (decodedToken.scope !== 'lab') {
       return reply.status(401).send({ success: false, message: "Token do laboratório inválido ou expirado. Recarregue a página." });
     }
-    const correctPassword = decodedToken.password;
+    const entry = bruteForceLab2Passwords.get(decodedToken.labId);
+    if (!entry) {
+      return reply.status(401).send({ success: false, message: "Token do laboratório inválido ou expirado. Recarregue a página." });
+    }
+    const correctPassword = entry.password;
 
     if (passwordGuess === correctPassword) {
       return reply.send({ success: true, message: `Acesso concedido! Senha "${correctPassword}" encontrada.` });
@@ -1600,6 +1690,13 @@ app.post('/admin/materials/:id/rehost-pdf', async (request, reply) => {
       return reply.status(422).send({ message: 'A URL de origem não retornou um arquivo direto (recebeu uma página HTML).' });
     }
     const buffer = Buffer.from(await download.arrayBuffer());
+    // O content-type do servidor de origem é só um rótulo declarado por
+    // ele — confere os bytes de verdade antes de gravar como PDF no bucket
+    // público, mesma defesa já usada em /profile/avatar e
+    // /cowork/authorizations.
+    if (!matchesSignature(buffer, 'application/pdf')) {
+      return reply.status(422).send({ message: 'O arquivo baixado não é um PDF válido.' });
+    }
 
     const path = `${id}.pdf`;
     const { error: uploadError } = await supabase.storage
@@ -1857,11 +1954,14 @@ app.post('/ai/chat', async (request, reply) => {
     }
     const { message, attachments, history } = chatSchema.parse(request.body);
 
-    // Confere que o conteúdo real de cada anexo de imagem bate com o
-    // mimeType declarado — mesma defesa que /profile/avatar já tinha via
-    // matchesSignature, que faltava aqui.
+    // Confere que o conteúdo real de cada anexo bate com o mimeType
+    // declarado — mesma defesa que /profile/avatar já tinha via
+    // matchesSignature. Cobre todos os tipos de ALLOWED_ATTACHMENT_TYPES que
+    // têm uma assinatura de bytes fixa (png/jpeg/webp/pdf); texto plano não
+    // tem assinatura de bytes possível, então não há o que checar aqui além
+    // do que o Zod já valida.
     for (const att of attachments || []) {
-      if (att.mimeType === 'image/png' || att.mimeType === 'image/jpeg') {
+      if (att.mimeType !== 'text/plain') {
         const buffer = Buffer.from(att.data, 'base64');
         if (!matchesSignature(buffer, att.mimeType)) {
           return reply.status(400).send({ message: 'Anexo inválido: conteúdo não corresponde ao tipo declarado.' });
