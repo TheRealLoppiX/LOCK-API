@@ -52,10 +52,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const NEW_PASSWORD_MIN = 8;
 const newPasswordField = () => z.string().min(NEW_PASSWORD_MIN, `A senha deve ter pelo menos ${NEW_PASSWORD_MIN} caracteres.`);
 
-const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email(), password: newPasswordField() });
+// password não faz mais parte do cadastro — o próprio servidor gera uma
+// senha aleatória (ver generateRandomPassword) e manda por e-mail junto com
+// o código de verificação.
+const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email() });
 const loginSchema = z.object({ identifier: z.string().min(3), password: z.string().min(6) });
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const resetPasswordSchema = z.object({ token: z.string().min(1), password: newPasswordField() });
+const verifyEmailSchema = z.object({ email: z.string().email(), code: z.string().min(1) });
+const resendVerificationSchema = z.object({ email: z.string().email() });
+
+// ===================================================================
+// GERAÇÃO DE SENHA/CÓDIGO — usa crypto.randomInt (uniforme, sem viés de
+// módulo) em vez de Math.random, já que os dois viram credencial real.
+// ===================================================================
+const GENERATED_PASSWORD_LENGTH = 24;
+const GENERATED_PASSWORD_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+// Nome diferente de generateRandomPassword (mais abaixo, usada só pelo
+// laboratório de força bruta) — os dois geram string aleatória, mas uma
+// vira credencial real e a outra é só o alvo de um exercício didático; não
+// vale a pena unificar e arriscar confundir os dois usos.
+function generateAccountPassword(length: number): string {
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    out += GENERATED_PASSWORD_CHARSET[crypto.randomInt(0, GENERATED_PASSWORD_CHARSET.length)];
+  }
+  return out;
+}
+
+const VERIFICATION_CODE_LENGTH = 6;
+const VERIFICATION_CODE_EXPIRY_MS = 30 * 60 * 1000; // 30 minutos
+// Sempre maiúsculo — a comparação normaliza o código digitado pelo usuário
+// pra maiúsculo também, então "sem distinção de maiúsculo/minúsculo" sai de
+// graça, sem precisar guardar/comparar as duas formas.
+const VERIFICATION_CODE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+function generateVerificationCode(length: number): string {
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    out += VERIFICATION_CODE_CHARSET[crypto.randomInt(0, VERIFICATION_CODE_CHARSET.length)];
+  }
+  return out;
+}
+function hashVerificationCode(code: string): string {
+  return crypto.createHash('sha256').update(code.trim().toUpperCase()).digest('hex');
+}
 // avatar_url de propósito NÃO está aqui — trocar avatar tem que passar por
 // POST /profile/avatar, que modera o conteúdo (matchesSignature + IA) antes
 // de aceitar. Aceitar uma URL livre aqui contornava essa moderação por
@@ -124,12 +164,23 @@ app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
 app.get('/ping', async (request, reply) => {
   return reply.send({ message: 'pong' });
 });
-/** @route POST /register */
+/**
+ * @route POST /register
+ * @description Cria a conta com uma senha gerada pelo servidor (não mais
+ * escolhida pelo usuário) e deixa a conta como não-verificada até o e-mail
+ * ser confirmado via POST /verify-email — senha e código de verificação são
+ * entregues só por e-mail, nunca na resposta desta rota.
+ */
 app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
   try {
-    const { name, email, password } = registerUserSchema.parse(request.body);
+    const { name, email } = registerUserSchema.parse(request.body);
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const generatedPassword = generateAccountPassword(GENERATED_PASSWORD_LENGTH);
+    const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+
+    const verificationCode = generateVerificationCode(VERIFICATION_CODE_LENGTH);
+    const hashedCode = hashVerificationCode(verificationCode);
+    const codeExpires = new Date(Date.now() + VERIFICATION_CODE_EXPIRY_MS);
 
     const { data: newUser, error: insertError } = await supabase
       .from('users')
@@ -137,9 +188,12 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
         name,
         email,
         password: hashedPassword,
-        avatar_url: `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(name)}`
+        avatar_url: `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(name)}`,
+        email_verified: false,
+        verification_code_hash: hashedCode,
+        verification_code_expires: codeExpires.toISOString(),
       })
-      .select('id, name, email, avatar_url')
+      .select('id, name, email')
       .single();
 
     // ======================================================
@@ -150,7 +204,7 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
       if (insertError.code === '23505') {
         return reply.status(409).send({ message: "Este e-mail já está cadastrado." });
       }
-      
+
       // Se for outro tipo de erro, loga e lança
       console.error("Erro ao inserir usuário no Supabase:", insertError);
       throw new Error("Falha ao criar usuário no banco de dados.");
@@ -161,23 +215,32 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
       throw new Error("Falha ao criar usuário, dados não retornados.");
     }
 
-    // Não bloqueia nem falha o registro se o e-mail não sair (sendEmail nunca
-    // lança) — cobre tanto o cadastro pelo LOCK quanto pelo LOCKIA, já que os
-    // dois chamam este mesmo /register.
-    sendEmail(
+    // Diferente do resto dos e-mails deste arquivo, este é bloqueante e o
+    // resultado é checado: a senha gerada e o código de verificação só
+    // existem aqui — se o envio falhar, a conta fica criada mas
+    // permanentemente inacessível (e o e-mail, sendo único, nunca mais
+    // poderia tentar se cadastrar de novo). Por isso desfaz o cadastro
+    // nesse caso, em vez de seguir como se tivesse dado certo.
+    const emailSent = await sendEmail(
       newUser.email,
-      'Bem-vindo(a) ao LOCK!',
-      `<p>Olá, ${newUser.name}!</p><p>A sua conta no LOCK foi criada com sucesso. Com ela você acessa tanto a plataforma educacional (laboratórios, quizzes, simulados e biblioteca) quanto o LOCKIA, o assistente de IA para cibersegurança.</p><p>Bons estudos!</p>`
+      'Bem-vindo(a) ao LOCK! Confirme o seu e-mail',
+      `<p>Olá, ${newUser.name}!</p>
+       <p>A sua conta no LOCK foi criada. O cadastro não pede mais uma senha escolhida por você — geramos uma senha temporária, que pode ser trocada a qualquer momento em Configurações depois de entrar:</p>
+       <p style="font-size:18px;font-weight:bold;letter-spacing:1px;">${generatedPassword}</p>
+       <p>Antes de entrar, confirme o seu e-mail com o código abaixo (válido por 30 minutos):</p>
+       <p style="font-size:26px;font-weight:bold;letter-spacing:5px;">${verificationCode}</p>
+       <p>Com essa conta você acessa tanto a plataforma educacional (laboratórios, quizzes, simulados e biblioteca) quanto o LOCKIA, o assistente de IA para cibersegurança.</p>
+       <p>Bons estudos!</p>`
     );
+    if (!emailSent) {
+      await supabase.from('users').delete().eq('id', newUser.id);
+      return reply.status(502).send({ message: 'Não foi possível enviar o e-mail de cadastro. Tente novamente em instantes.' });
+    }
 
-    const token = app.jwt.sign({
-      sub: newUser.id.toString(),
-      name: newUser.name,
+    return reply.status(201).send({
+      message: 'Cadastro realizado! Verifique o seu e-mail para confirmar a conta.',
       email: newUser.email,
-      avatar_url: newUser.avatar_url,
-    }, { expiresIn: '7 days' });
-
-    return reply.status(201).send({ token });
+    });
 
   } catch (error: any) {
     // Se o erro for do Zod (validação)
@@ -186,6 +249,114 @@ app.post('/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' }
     }
     // Pega qualquer outra mensagem de erro
     return reply.status(error.statusCode || 500).send({ message: error.message || "Erro interno do servidor" });
+  }
+});
+
+/**
+ * @route POST /verify-email
+ * @description Confirma o código de 6 dígitos enviado no cadastro e ativa a
+ * conta — é só a partir daqui que o login passa a funcionar. Devolve
+ * token+user, exatamente como o /login, pra o cliente entrar direto.
+ */
+app.post('/verify-email', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  try {
+    const { email, code } = verifyEmailSchema.parse(request.body);
+    const hashedCode = hashVerificationCode(code);
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, avatar_url, is_admin, email_verified, verification_code_hash, verification_code_expires')
+      .eq('email', email)
+      .maybeSingle();
+    if (error) throw error;
+
+    if (!user) {
+      return reply.status(400).send({ message: 'E-mail ou código inválido.' });
+    }
+
+    // Idempotente: se o usuário já verificou (ex: reenviou o formulário),
+    // não trata como erro — só loga normalmente.
+    if (!user.email_verified) {
+      if (!user.verification_code_hash || !user.verification_code_expires || new Date(user.verification_code_expires) < new Date()) {
+        return reply.status(400).send({ message: 'Código expirado. Solicite um novo.' });
+      }
+      if (user.verification_code_hash !== hashedCode) {
+        return reply.status(401).send({ message: 'Código inválido.' });
+      }
+
+      const { error: updateError } = await supabase
+        .from('users')
+        .update({ email_verified: true, verification_code_hash: null, verification_code_expires: null })
+        .eq('id', user.id);
+      if (updateError) throw updateError;
+    }
+
+    const token = app.jwt.sign({
+      sub: user.id.toString(),
+      name: user.name,
+      email: user.email,
+      avatar_url: user.avatar_url,
+      is_admin: user.is_admin || false,
+    }, { expiresIn: '7 days' });
+
+    return reply.send({
+      user: { id: user.id, name: user.name, email: user.email, avatar_url: user.avatar_url, is_admin: user.is_admin },
+      token,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro em /verify-email:', error);
+    return reply.status(500).send({ message: 'Erro interno ao verificar e-mail.' });
+  }
+});
+
+/**
+ * @route POST /resend-verification
+ * @description Gera e envia um novo código de verificação, pro caso do
+ * primeiro ter expirado ou se perdido. Resposta genérica sempre igual,
+ * exista ou não a conta / já esteja verificada — mesmo padrão do
+ * /forgot-password, evita enumeração de e-mails cadastrados.
+ */
+app.post('/resend-verification', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  try {
+    const { email } = resendVerificationSchema.parse(request.body);
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, email_verified')
+      .eq('email', email)
+      .maybeSingle();
+    if (error) throw error;
+
+    if (user && !user.email_verified) {
+      const verificationCode = generateVerificationCode(VERIFICATION_CODE_LENGTH);
+      const hashedCode = hashVerificationCode(verificationCode);
+      const codeExpires = new Date(Date.now() + VERIFICATION_CODE_EXPIRY_MS);
+      await supabase
+        .from('users')
+        .update({ verification_code_hash: hashedCode, verification_code_expires: codeExpires.toISOString() })
+        .eq('id', user.id);
+      await sendEmail(
+        user.email,
+        'Seu novo código de verificação — LOCK',
+        `<p>Olá, ${user.name}!</p><p>Seu novo código de verificação (válido por 30 minutos):</p><p style="font-size:26px;font-weight:bold;letter-spacing:5px;">${verificationCode}</p>`
+      );
+    } else {
+      // Mesmo delay de timing-safety já usado no /forgot-password — sem
+      // isso, a ausência da chamada de rede (Brevo) que o caminho "existe e
+      // não está verificado" faz nesse if deixaria essa resposta
+      // mensuravelmente mais rápida, vazando por timing se o e-mail existe.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    return reply.send({ message: 'Se a conta existir e ainda não estiver verificada, um novo código foi enviado.' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro em /resend-verification:', error);
+    return reply.status(500).send({ message: 'Erro interno ao reenviar código.' });
   }
 });
 
@@ -208,7 +379,7 @@ app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } 
         // Lista explícita de colunas (não select('*')) — sem isso, qualquer
         // coluna sensível nova da tabela users (ex: reset_token) vaza na
         // resposta do login sem ninguém perceber.
-        const LOGIN_USER_COLUMNS = 'id, name, email, password, avatar_url, is_admin';
+        const LOGIN_USER_COLUMNS = 'id, name, email, password, avatar_url, is_admin, email_verified';
         let user: any = null;
         let error: any = null;
         ({ data: user, error } = await supabase.from("users").select(LOGIN_USER_COLUMNS).eq("email", identifier).maybeSingle());
@@ -237,6 +408,19 @@ app.post("/login", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } 
         if (!passwordMatch) {
             console.log("⚠️ Senha incorreta para:", identifier);
             return reply.status(401).send({ message: "Credenciais inválidas" });
+        }
+
+        // Contas antigas (de antes da verificação de e-mail existir) vêm com
+        // email_verified=true por padrão no banco — só bloqueia cadastros
+        // novos que ainda não confirmaram o código enviado por e-mail.
+        // "code" (não só a mensagem) deixa o front decidir de forma
+        // confiável se mostra a tela de verificação, sem depender de casar
+        // a string exata da mensagem.
+        if (user.email_verified === false) {
+            return reply.status(403).send({
+                message: 'Confirme o seu e-mail antes de entrar. Verifique sua caixa de entrada.',
+                code: 'EMAIL_NOT_VERIFIED',
+            });
         }
 
         // Gera token
