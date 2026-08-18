@@ -58,7 +58,6 @@ const newPasswordField = () => z.string().min(NEW_PASSWORD_MIN, `A senha deve te
 const registerUserSchema = z.object({ name: z.string().min(3), email: z.string().email() });
 const loginSchema = z.object({ identifier: z.string().min(3), password: z.string().min(6) });
 const forgotPasswordSchema = z.object({ email: z.string().email() });
-const resetPasswordSchema = z.object({ token: z.string().min(1), password: newPasswordField() });
 const verifyEmailSchema = z.object({ email: z.string().email(), code: z.string().min(1) });
 const resendVerificationSchema = z.object({ email: z.string().email() });
 
@@ -675,57 +674,58 @@ app.delete('/profile', async (request, reply) => {
 
 /**
  * @route POST /forgot-password
- * @description Inicia o fluxo de redefinição de palavra-passe.
+ * @description Redefine a senha do utilizador para uma nova senha gerada
+ * pelo servidor — mesmo padrão do /register, o utilizador não escolhe mais a
+ * própria senha aqui também. Primeiro envia um e-mail de confirmação do
+ * pedido, depois um segundo e-mail com a nova senha (mesmo modelo visual do
+ * e-mail de cadastro); a senha só é gravada no banco depois do e-mail com a
+ * senha ter sido aceito pela Brevo, para nunca trocar a senha de alguém sem
+ * conseguir entregar a nova a ele.
  */
 app.post("/forgot-password", { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     try {
         const { email } = forgotPasswordSchema.parse(request.body);
-        const { data: user } = await supabase.from("users").select("id").eq("email", email).single();
+        const { data: user } = await supabase.from("users").select("id, name, email").eq("email", email).single();
         if (user) {
-            const resetToken = crypto.randomBytes(32).toString("hex");
-            const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-            const expires = new Date(Date.now() + 3600000); // 1 hora
-            await supabase.from("users").update({ reset_token: hashedToken, reset_token_expires: expires.toISOString() }).eq("id", user.id);
-            const resetUrl = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/reset-password/${resetToken}`;
+            const newPassword = generateAccountPassword(GENERATED_PASSWORD_LENGTH);
+            const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-            await sendEmail(
-                email,
-                'O seu Link de Redefinição de Palavra-passe',
-                `<p>Clique aqui para redefinir a sua senha no LOCK:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Se você não pediu essa redefinição, ignore este e-mail.</p>`
+            const confirmationSent = await sendEmail(
+                user.email,
+                'Confirmação de redefinição de senha — LOCK',
+                `<p>Olá, ${user.name}!</p>
+                 <p>Recebemos um pedido de redefinição de senha para a sua conta no LOCK. Uma nova senha de acesso já foi gerada e chega em um segundo e-mail, a seguir.</p>
+                 <p>Se você não pediu essa redefinição, ignore este e-mail — a sua senha atual continua valendo até o segundo e-mail ser entregue.</p>`
             );
+
+            if (confirmationSent) {
+                const passwordSent = await sendEmail(
+                    user.email,
+                    'A sua nova senha de acesso — LOCK',
+                    `<p>Olá, ${user.name}!</p>
+                     <p>A sua senha no LOCK foi redefinida. Esta é a sua nova senha de acesso, que pode ser trocada a qualquer momento em Configurações depois de entrar:</p>
+                     <p style="font-size:18px;font-weight:bold;letter-spacing:1px;">${newPassword}</p>`
+                );
+                if (passwordSent) {
+                    await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
+                } else {
+                    console.error(`Erro em forgot-password: e-mail com a nova senha não foi entregue para ${user.email} — senha NÃO alterada.`);
+                }
+            } else {
+                console.error(`Erro em forgot-password: e-mail de confirmação não foi entregue para ${user.email} — senha NÃO alterada.`);
+            }
         } else {
             // Sem isso, a resposta para um e-mail inexistente volta bem mais
-            // rápido que para um existente (que espera a chamada à Brevo
-            // completar) — um atacante consegue medir a diferença de latência
-            // pra enumerar e-mails cadastrados mesmo com a mensagem genérica.
+            // rápido que para um existente (que espera duas chamadas à Brevo
+            // completarem) — um atacante consegue medir a diferença de
+            // latência pra enumerar e-mails cadastrados mesmo com a mensagem
+            // genérica.
             await new Promise((resolve) => setTimeout(resolve, 300));
         }
-        return { message: "Se um utilizador com este e-mail existir, um link de redefinição foi enviado." };
+        return { message: "Se um utilizador com este e-mail existir, enviamos um e-mail de confirmação seguido da nova senha de acesso." };
     } catch (error) {
         if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
         console.error("Erro em forgot-password:", error);
-        return reply.status(500).send({ error: "Erro interno no servidor." });
-    }
-});
-
-/**
- * @route POST /reset-password
- * @description Conclui a redefinição de palavra-passe.
- */
-app.post("/reset-password", async (request, reply) => {
-    try {
-        const { token, password } = resetPasswordSchema.parse(request.body);
-        const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
-        const { data: user, error } = await supabase.from("users").select("*").eq("reset_token", hashedToken).single();
-        if (error || !user || new Date(user.reset_token_expires) < new Date()) {
-            return reply.status(400).send({ error: "Token inválido ou expirado." });
-        }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await supabase.from("users").update({ password: hashedPassword, reset_token: null, reset_token_expires: null }).eq("id", user.id);
-        return { message: "Palavra-passe redefinida com sucesso!" };
-    } catch (error) {
-        if (error instanceof z.ZodError) { return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() }); }
-        console.error("Erro em reset-password:", error);
         return reply.status(500).send({ error: "Erro interno no servidor." });
     }
 });
