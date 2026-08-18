@@ -60,6 +60,9 @@ const loginSchema = z.object({ identifier: z.string().min(3), password: z.string
 const forgotPasswordSchema = z.object({ email: z.string().email() });
 const verifyEmailSchema = z.object({ email: z.string().email(), code: z.string().min(1) });
 const resendVerificationSchema = z.object({ email: z.string().email() });
+const inviteAdminSchema = z.object({ name: z.string().min(3), email: z.string().email() });
+const activateAdminInviteSchema = z.object({ email: z.string().email(), code: z.string().min(1) });
+const updateAdminSchema = z.object({ name: z.string().min(3) });
 
 // ===================================================================
 // GERAÇÃO DE SENHA/CÓDIGO — usa crypto.randomInt (uniforme, sem viés de
@@ -95,6 +98,13 @@ function generateVerificationCode(length: number): string {
 function hashVerificationCode(code: string): string {
   return crypto.createHash('sha256').update(code.trim().toUpperCase()).digest('hex');
 }
+
+// Convite de admin: mesma dupla generate+hash acima (código maiúsculo,
+// hash sha256), só com um código mais longo (é um convite de acesso
+// administrativo, não uma verificação de posse de e-mail) e validade bem
+// maior (é um convite real, pode levar dias até a pessoa ver o e-mail).
+const ADMIN_INVITE_CODE_LENGTH = 10;
+const ADMIN_INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias
 // avatar_url de propósito NÃO está aqui — trocar avatar tem que passar por
 // POST /profile/avatar, que modera o conteúdo (matchesSignature + IA) antes
 // de aceitar. Aceitar uma URL livre aqui contornava essa moderação por
@@ -1970,6 +1980,348 @@ app.post('/admin/modules', async (request, reply) => {
     return reply.status(500).send({ message: "Erro interno ao salvar módulo." });
   }
 });
+
+// ===================================================================
+// GERENCIAMENTO DE ADMINISTRADORES
+// ===================================================================
+// Convite por e-mail em vez de criação direta: a conta do convidado só
+// nasce na tabela `users` quando ele mesmo confirma o convite com o código
+// (POST /admin/admins/activate) — até lá, o convite pendente vive só na
+// tabela `admin_invites`. Mesmo raciocínio de "não mudar estado persistente
+// sem antes confirmar que o e-mail é entregável" já usado em
+// /forgot-password: o código é gerado e o e-mail é enviado ANTES de
+// gravar/atualizar a linha do convite, pra nunca sobrescrever um convite já
+// entregue com um código novo que falhou ao sair.
+const LOGO_URL = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/Logo%20lock.png`;
+
+function buildAdminInviteEmail(inviteeName: string, inviterName: string, code: string, activateUrl: string): string {
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0d1117;padding:32px 0;">
+      <tr><td align="center">
+        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="background-color:#161b22;border-radius:12px;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">
+          <tr>
+            <td align="center" style="background-color:#0d1117;padding:28px 24px;border-bottom:2px solid #00bfff;">
+              <img src="${LOGO_URL}" alt="LOCK" width="64" height="64" style="display:block;border-radius:12px;" />
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px 28px;color:#e0f2f7;">
+              <h1 style="margin:0 0 4px;font-size:22px;color:#ffffff;">Convite para administrador do LOCK</h1>
+              <p style="margin:0 0 20px;font-size:14px;color:#a0b2c2;">Laboratório Online de Cibersegurança</p>
+              <p style="margin:0 0 16px;font-size:15px;line-height:1.5;"><strong>${inviterName}</strong> convidou você, <strong>${inviteeName}</strong>, para ser administrador(a) da plataforma LOCK.</p>
+              <p style="margin:0 0 20px;font-size:15px;line-height:1.5;">Para ativar o acesso, acesse o link abaixo e informe o código de ativação:</p>
+              <p style="margin:0 0 20px;text-align:center;">
+                <a href="${activateUrl}" style="display:inline-block;background-color:#00bfff;color:#0d1117;font-weight:bold;text-decoration:none;padding:12px 24px;border-radius:8px;font-size:15px;">Ativar minha conta</a>
+              </p>
+              <p style="margin:0 0 8px;font-size:14px;color:#a0b2c2;">Ou acesse ${activateUrl} e informe o código abaixo manualmente:</p>
+              <p style="margin:0 0 24px;text-align:center;font-size:26px;font-weight:bold;letter-spacing:5px;color:#00bfff;background-color:#0d1117;padding:14px;border-radius:8px;">${code}</p>
+              <p style="margin:0;font-size:13px;color:#a0b2c2;line-height:1.5;">Este convite expira em 7 dias. Se você não esperava este convite, pode ignorar este e-mail com segurança — nenhuma conta será criada até o código ser confirmado.</p>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+    </table>`;
+}
+
+/**
+ * @route POST /admin/admins/invite
+ * @description Convida um novo administrador por e-mail (Create do CRUD de
+ * admins). Também serve para reenviar um convite pendente — chamar de novo
+ * pro mesmo e-mail gera um novo código e invalida o anterior.
+ */
+app.post('/admin/admins/invite', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: 'Acesso negado.' });
+    }
+
+    const { name, email } = inviteAdminSchema.parse(request.body);
+
+    const { data: existingUser } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
+    if (existingUser) {
+      return reply.status(409).send({ message: 'Já existe uma conta com este e-mail.' });
+    }
+
+    const code = generateVerificationCode(ADMIN_INVITE_CODE_LENGTH);
+    const codeHash = hashVerificationCode(code);
+    const expiresAt = new Date(Date.now() + ADMIN_INVITE_EXPIRY_MS);
+    const activateUrl = `${process.env.FRONTEND_URL || 'https://lock-front.onrender.com'}/activate-admin?email=${encodeURIComponent(email)}`;
+    const inviterName = request.user.name as string;
+
+    const emailSent = await sendEmail(
+      email,
+      `${inviterName} convidou você para ser administrador(a) do LOCK`,
+      buildAdminInviteEmail(name, inviterName, code, activateUrl)
+    );
+    if (!emailSent) {
+      return reply.status(502).send({ message: 'Não foi possível enviar o convite por e-mail. Tente novamente em instantes.' });
+    }
+
+    const { error: upsertError } = await supabase.from('admin_invites').upsert(
+      {
+        name,
+        email,
+        code_hash: codeHash,
+        invited_by: request.user.sub,
+        invited_by_name: inviterName,
+        expires_at: expiresAt.toISOString(),
+      },
+      { onConflict: 'email' }
+    );
+    if (upsertError) throw upsertError;
+
+    return reply.status(201).send({ message: 'Convite enviado.' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro ao convidar administrador:', error);
+    return reply.status(500).send({ message: 'Erro interno ao enviar convite.' });
+  }
+});
+
+/**
+ * @route GET /admin/admins
+ * @description Lista os administradores atuais e os convites pendentes
+ * (Read do CRUD de admins). Convites expirados são descartados na leitura.
+ */
+app.get('/admin/admins', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: 'Acesso negado.' });
+    }
+
+    await supabase.from('admin_invites').delete().lt('expires_at', new Date().toISOString());
+
+    const { data: admins, error: adminsError } = await supabase
+      .from('users')
+      .select('id, name, email, avatar_url')
+      .eq('is_admin', true)
+      .order('name', { ascending: true });
+    if (adminsError) throw adminsError;
+
+    const { data: invites, error: invitesError } = await supabase
+      .from('admin_invites')
+      .select('id, name, email, invited_by_name, expires_at, created_at')
+      .order('created_at', { ascending: false });
+    if (invitesError) throw invitesError;
+
+    return reply.send({ admins, invites });
+  } catch (error) {
+    console.error('Erro ao listar administradores:', error);
+    return reply.status(500).send({ message: 'Erro ao carregar administradores.' });
+  }
+});
+
+/**
+ * @route PATCH /admin/admins/:id
+ * @description Renomeia um administrador (Update do CRUD de admins).
+ */
+app.patch('/admin/admins/:id', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: 'Acesso negado.' });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const { name } = updateAdminSchema.parse(request.body);
+
+    const { data: target } = await supabase.from('users').select('id, is_admin').eq('id', id).maybeSingle();
+    if (!target || !target.is_admin) {
+      return reply.status(404).send({ message: 'Administrador não encontrado.' });
+    }
+
+    const { data: updated, error } = await supabase
+      .from('users')
+      .update({ name })
+      .eq('id', id)
+      .select('id, name, email, avatar_url')
+      .single();
+    if (error) throw error;
+
+    return reply.send({ admin: updated });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro ao renomear administrador:', error);
+    return reply.status(500).send({ message: 'Erro interno ao renomear administrador.' });
+  }
+});
+
+/**
+ * @route DELETE /admin/admins/:id
+ * @description Remove o acesso de administrador (Delete do CRUD de admins)
+ * — só desliga `is_admin`, a conta e todo o progresso do usuário continuam
+ * intactos como uma conta comum. Nunca deixa o sistema sem nenhum admin.
+ */
+app.delete('/admin/admins/:id', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: 'Acesso negado.' });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const { data: target } = await supabase.from('users').select('id, is_admin').eq('id', id).maybeSingle();
+    if (!target || !target.is_admin) {
+      return reply.status(404).send({ message: 'Administrador não encontrado.' });
+    }
+
+    const { count, error: countError } = await supabase
+      .from('users')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_admin', true);
+    if (countError) throw countError;
+    if ((count || 0) <= 1) {
+      return reply.status(400).send({ message: 'Não é possível remover o último administrador.' });
+    }
+
+    const { error } = await supabase.from('users').update({ is_admin: false }).eq('id', id);
+    if (error) throw error;
+
+    return reply.status(200).send({ message: 'Acesso de administrador removido.' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error('Erro ao remover administrador:', error);
+    return reply.status(500).send({ message: 'Erro interno ao remover administrador.' });
+  }
+});
+
+/**
+ * @route DELETE /admin/admins/invites/:id
+ * @description Cancela um convite de admin pendente (ainda não ativado).
+ */
+app.delete('/admin/admins/invites/:id', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    if (!request.user.is_admin) {
+      return reply.status(403).send({ message: 'Acesso negado.' });
+    }
+
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const { error } = await supabase.from('admin_invites').delete().eq('id', id);
+    if (error) throw error;
+
+    return reply.status(200).send({ message: 'Convite cancelado.' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error('Erro ao cancelar convite:', error);
+    return reply.status(500).send({ message: 'Erro interno ao cancelar convite.' });
+  }
+});
+
+/**
+ * @route POST /admin/admins/activate
+ * @description Rota pública — o convidado confirma o código recebido por
+ * e-mail para ativar a própria conta de administrador. É só aqui que a
+ * conta é de fato criada na tabela `users` (ver comentário no topo desta
+ * seção). Devolve token+user, mesmo padrão do /verify-email, pra entrar
+ * direto. A senha de acesso (gerada, nunca escolhida — mesmo padrão do
+ * /register) só existe no e-mail enviado nesta rota; se esse envio falhar,
+ * a conta não é criada e o convite continua válido para nova tentativa.
+ */
+app.post('/admin/admins/activate', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  try {
+    const { email, code } = activateAdminInviteSchema.parse(request.body);
+
+    const { data: invite, error: inviteError } = await supabase
+      .from('admin_invites')
+      .select('id, name, email, code_hash, expires_at')
+      .eq('email', email)
+      .maybeSingle();
+    if (inviteError) throw inviteError;
+
+    if (!invite || new Date(invite.expires_at) < new Date()) {
+      if (invite) await supabase.from('admin_invites').delete().eq('id', invite.id);
+      return reply.status(400).send({ message: 'Convite inválido ou expirado.' });
+    }
+    if (invite.code_hash !== hashVerificationCode(code)) {
+      return reply.status(401).send({ message: 'Código inválido.' });
+    }
+
+    const newPassword = generateAccountPassword(GENERATED_PASSWORD_LENGTH);
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    const passwordSent = await sendEmail(
+      invite.email,
+      'A sua senha de acesso — administrador LOCK',
+      `<p>Olá, ${invite.name}!</p>
+       <p>Sua conta de administrador no LOCK foi ativada. Esta é a sua senha de acesso, que pode ser trocada a qualquer momento em Configurações depois de entrar:</p>
+       <p style="font-size:18px;font-weight:bold;letter-spacing:1px;">${newPassword}</p>`
+    );
+    if (!passwordSent) {
+      return reply.status(502).send({ message: 'Não foi possível enviar a senha de acesso por e-mail. Tente novamente em instantes.' });
+    }
+
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert({
+        name: invite.name,
+        email: invite.email,
+        password: hashedPassword,
+        avatar_url: `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(invite.name)}`,
+        is_admin: true,
+        email_verified: true,
+      })
+      .select('id, name, email, avatar_url, is_admin')
+      .single();
+    if (insertError) {
+      if (insertError.code === '23505') {
+        await supabase.from('admin_invites').delete().eq('id', invite.id);
+        return reply.status(409).send({ message: 'Este e-mail já possui uma conta.' });
+      }
+      throw insertError;
+    }
+
+    await supabase.from('admin_invites').delete().eq('id', invite.id);
+
+    const token = app.jwt.sign({
+      sub: newUser.id.toString(),
+      name: newUser.name,
+      email: newUser.email,
+      avatar_url: newUser.avatar_url,
+      is_admin: true,
+    }, { expiresIn: '7 days' });
+
+    return reply.status(201).send({ user: newUser, token });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
+    }
+    console.error('Erro ao ativar convite de administrador:', error);
+    return reply.status(500).send({ message: 'Erro interno ao ativar conta.' });
+  }
+});
+
 // --- XSS ---
 // (XSS Nível 1 é Frontend-Puro, não precisa de rota)
 
