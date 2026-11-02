@@ -671,6 +671,18 @@ app.delete('/profile', async (request, reply) => {
             )
         );
 
+        // As linhas de cowork_authorizations somem sozinhas (ON DELETE CASCADE),
+        // mas os PDFs no Storage não — sem isso ficariam órfãos no bucket.
+        // Best effort, igual ao avatar: não impede a exclusão da conta.
+        try {
+            const { data: certFiles } = await supabase.storage.from(COWORK_AUTH_BUCKET).list(userId, { limit: 1000 });
+            if (certFiles?.length) {
+                await supabase.storage.from(COWORK_AUTH_BUCKET).remove(certFiles.map((f) => `${userId}/${f.name}`));
+            }
+        } catch (storageError) {
+            console.error(`Erro ao remover PDFs do Cowork da conta ${userId}:`, storageError);
+        }
+
         const { error: deleteError } = await supabase.from('users').delete().eq('id', userId);
         if (deleteError) throw deleteError;
 
