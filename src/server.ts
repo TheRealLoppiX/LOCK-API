@@ -2692,6 +2692,58 @@ app.get('/cowork/authorizations', async (request, reply) => {
   }
 });
 
+/**
+ * @route DELETE /cowork/authorizations/:id
+ * @description Apaga um certificado do próprio usuário (ex: enviado por
+ * engano) — a linha da tabela e o PDF no Storage. A busca já filtra por
+ * user_id, então o id de um certificado de outro usuário devolve 404, sem
+ * revelar se ele existe.
+ */
+app.delete('/cowork/authorizations/:id', async (request, reply) => {
+  try {
+    try {
+      await request.jwtVerify();
+    } catch {
+      return reply.status(401).send({ message: 'Sessão expirada ou inválida. Faça login novamente.' });
+    }
+    const userId = request.user.sub;
+    const { id } = z.object({ id: z.string().min(1).max(100) }).parse(request.params);
+
+    const { data: existing, error: findError } = await supabase
+      .from('cowork_authorizations')
+      .select('id, storage_path')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+    // id malformado (não é um uuid) cai aqui como erro do Postgres — mesma
+    // resposta de "não encontrado", não um 500.
+    if (findError || !existing) {
+      return reply.status(404).send({ message: 'Certificado não encontrado.' });
+    }
+
+    const { error: deleteError } = await supabase
+      .from('cowork_authorizations')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (deleteError) throw deleteError;
+
+    // Depois da linha já apagada: se a remoção do arquivo falhar, sobra só
+    // um PDF órfão no bucket privado (nunca uma linha apontando pra nada).
+    await supabase.storage.from(COWORK_AUTH_BUCKET).remove([existing.storage_path]).catch((storageError) => {
+      console.error('Erro ao remover PDF de autorização do Storage:', storageError);
+    });
+
+    return reply.send({ message: 'Certificado removido.' });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return reply.status(400).send({ message: 'Dados inválidos.' });
+    }
+    console.error('Erro ao remover certificado de autorização do Cowork:', error);
+    return reply.status(500).send({ message: 'Erro interno ao remover certificado.' });
+  }
+});
+
 // ===================================================================
 // INICIALIZAÇÃO DO SERVIDOR
 // ===================================================================
