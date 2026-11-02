@@ -7,7 +7,7 @@ import { supabase } from "./supabaseConnection.js";
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { lockiaClient } from './services/LockiaClient.js';
+import { lockiaClient, lockiaErrorReply } from './services/LockiaClient.js';
 import { looksLikePromptInjection } from './services/PromptGuard.js';
 import { sendEmail } from './services/MailService.js';
 import { PDFParse } from 'pdf-parse';
@@ -1658,6 +1658,8 @@ app.post('/admin/questions/generate', async (request, reply) => {
       return reply.status(400).send({ message: 'Dados inválidos.', issues: error.format() });
     }
     console.error("Erro ao gerar questões com IA:", error);
+    const lockiaReply = lockiaErrorReply(error);
+    if (lockiaReply) return reply.status(lockiaReply.status).send({ message: lockiaReply.message });
     return reply.status(500).send({ message: "Erro ao gerar questões com IA." });
   }
 });
@@ -2521,6 +2523,8 @@ app.post('/ai/chat', async (request, reply) => {
       return reply.status(400).send({ message: 'Mensagem inválida.', issues: error.format() });
     }
     console.error('Erro na rota /ai/chat:', error);
+    const lockiaReply = lockiaErrorReply(error);
+    if (lockiaReply) return reply.status(lockiaReply.status).send({ message: lockiaReply.message });
     return reply.status(500).send({ message: 'Erro ao processar com IA.' });
   }
 });
@@ -2547,6 +2551,8 @@ app.post('/ai/analyze-quiz', async (request, reply) => {
       return reply.status(400).send({ message: 'Dados inválidos.' });
     }
     console.error('Erro na rota /ai/analyze-quiz:', error);
+    const lockiaReply = lockiaErrorReply(error);
+    if (lockiaReply) return reply.status(lockiaReply.status).send({ message: lockiaReply.message });
     return reply.status(500).send({ message: 'Erro ao analisar resultados.' });
   }
 });
