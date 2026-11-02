@@ -118,7 +118,7 @@ const deleteAccountSchema = z.object({ password: z.string().min(6) });
 const AVATAR_MIME_TO_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg' };
 const avatarUploadSchema = z.object({
   data: z.string().min(1, 'Nenhuma imagem enviada.'),
-  mimeType: z.enum(['image/png', 'image/jpeg'], { errorMap: () => ({ message: 'Use uma imagem PNG ou JPEG.' }) }),
+  mimeType: z.enum(['image/png', 'image/jpeg'], { error: 'Use uma imagem PNG ou JPEG.' }),
 });
 const createQuestionSchema = z.object({
   topic: z.string(),

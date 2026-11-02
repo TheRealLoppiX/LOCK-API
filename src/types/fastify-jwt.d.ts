@@ -9,10 +9,11 @@ declare module '@fastify/jwt' {
       avatar_url?: string;
       is_admin?: boolean;
       // Presente só em tokens efêmeros de laboratório (ex. brute-force nível 2),
-      // que carregam a senha-alvo em vez de identificar um usuário de verdade.
+      // que carregam um labId opaco em vez de identificar um usuário de verdade
+      // (a senha-alvo fica só na memória do servidor, nunca no token).
       // O claim `scope` distingue esse tipo de token de um token de sessão real.
       scope?: string;
-      password?: string;
+      labId?: string;
     };
     user: {
       sub: string;
